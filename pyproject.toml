@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diting-core"
+version = "0.0.1"
+description = "Diting core logic"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=7.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
