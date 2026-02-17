@@ -1,0 +1,30 @@
+// 专家辩论协议 [Ref: 04_全链路通信协议矩阵 A]
+// Stage1-02 占位；与 04_ 协议矩阵一致
+syntax = "proto3";
+
+package diting.brain;
+
+enum ExpertDomain {
+  DOMAIN_UNSPECIFIED = 0;
+  DOMAIN_AGRI = 1;
+  DOMAIN_TECH = 2;
+  DOMAIN_MACRO = 3;
+  DOMAIN_QUANT = 4;
+}
+
+message ExpertOpinion {
+  string symbol = 1;
+  ExpertDomain domain = 2;
+  bool is_supported = 3;
+
+  enum SignalType {
+    SIGNAL_NEUTRAL = 0;
+    SIGNAL_BULLISH = 1;
+    SIGNAL_BEARISH = 2;
+  }
+  SignalType direction = 4;
+  double confidence = 5;
+  string reasoning_summary = 6;
+  repeated string risk_factors = 7;
+  int64 timestamp = 8;
+}

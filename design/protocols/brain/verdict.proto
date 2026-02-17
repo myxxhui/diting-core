@@ -1,0 +1,24 @@
+// 判官裁决协议 [Ref: 04_全链路通信协议矩阵 B]
+// Stage1-02 占位
+syntax = "proto3";
+
+package diting.brain;
+
+import "expert.proto";
+
+message CouncilVerdict {
+  string decision_id = 1;
+  string symbol = 2;
+
+  enum Action {
+    ACTION_PASS = 0;
+    ACTION_BUY = 1;
+    ACTION_SELL = 2;
+    ACTION_CUT = 3;
+  }
+  Action action = 3;
+  double win_rate_prediction = 4;
+  double suggested_position_ratio = 5;
+  string primary_reasoning = 6;
+  bool is_defensive_mode = 7;
+}

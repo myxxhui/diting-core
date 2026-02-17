@@ -1,0 +1,13 @@
+// Module B 量化扫描引擎输出 [Ref: 04_全链路通信协议矩阵 Module A/B]
+// Stage1-02 占位；technical_score、strategy_source、sector_strength
+syntax = "proto3";
+
+package diting.quant;
+
+message QuantSignal {
+  string symbol = 1;
+  double technical_score = 2;   // 0-100
+  string strategy_source = 3;  // 策略池来源
+  double sector_strength = 4;   // 板块强度
+  string correlation_id = 5;
+}

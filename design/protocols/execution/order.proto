@@ -1,0 +1,32 @@
+// 执行指令协议 [Ref: 04_全链路通信协议矩阵 C]
+// Stage1-02 占位
+syntax = "proto3";
+
+package diting.execution;
+
+message TradeOrder {
+  string order_id = 1;
+  string symbol = 2;
+
+  enum OrderType {
+    MARKET = 0;
+    LIMIT = 1;
+  }
+  OrderType type = 3;
+  double price = 4;
+  int32 quantity = 5;
+
+  enum AuditStatus {
+    PENDING_APPROVAL = 0;
+    APPROVED = 1;
+    REJECTED = 2;
+    AUTO_EXECUTED = 3;
+  }
+  AuditStatus audit_status = 6;
+  string strategy_source = 7;
+}
+
+message OrderStatus {
+  string order_id = 1;
+  string status = 2;  // PENDING, FILLED, CANCELLED
+}
