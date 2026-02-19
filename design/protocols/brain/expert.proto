@@ -12,6 +12,13 @@ enum ExpertDomain {
   DOMAIN_QUANT = 4;
 }
 
+// 双轨制：SHORT_TERM 对应现金奶牛轨（A 轨），LONG_TERM 对应长期捕手轨（B 轨/VC-Agent）
+enum TimeHorizon {
+  TIME_HORIZON_UNSPECIFIED = 0;
+  SHORT_TERM = 1;  // 现有模式：看几天，受不可能三角与 2% 止损约束
+  LONG_TERM = 2;   // VC 模式：看几年，判官豁免 2% 硬止损与现金拖累
+}
+
 message ExpertOpinion {
   string symbol = 1;
   ExpertDomain domain = 2;
@@ -27,4 +34,5 @@ message ExpertOpinion {
   string reasoning_summary = 6;
   repeated string risk_factors = 7;
   int64 timestamp = 8;
+  TimeHorizon horizon = 9;  // 双轨分流：LONG_TERM 时判官豁免 2% 止损与现金拖累
 }
