@@ -1,0 +1,15 @@
+// [Ref: 04_全链路通信协议矩阵] 风控遥测协议
+// 代码仓：diting-core/design/protocols/risk/telemetry.proto
+
+syntax = "proto3";
+
+package diting.risk;
+
+message PortfolioState {
+  double total_equity = 1;
+  double cash_balance = 2;
+  double year_high_equity = 3;
+  double current_drawdown = 4;
+  bool is_profit_locked = 5;
+  double exposure_ratio = 6;
+}

@@ -1,5 +1,6 @@
-// 执行指令协议 [Ref: 04_全链路通信协议矩阵 C]
-// Stage1-02 占位
+// [Ref: 04_全链路通信协议矩阵] 执行指令协议
+// 代码仓：diting-core/design/protocols/execution/order.proto
+
 syntax = "proto3";
 
 package diting.execution;
@@ -7,7 +8,6 @@ package diting.execution;
 message TradeOrder {
   string order_id = 1;
   string symbol = 2;
-
   enum OrderType {
     MARKET = 0;
     LIMIT = 1;
@@ -15,7 +15,6 @@ message TradeOrder {
   OrderType type = 3;
   double price = 4;
   int32 quantity = 5;
-
   enum AuditStatus {
     PENDING_APPROVAL = 0;
     APPROVED = 1;
@@ -28,5 +27,5 @@ message TradeOrder {
 
 message OrderStatus {
   string order_id = 1;
-  string status = 2;  // PENDING, FILLED, CANCELLED
+  int32 status = 2;
 }

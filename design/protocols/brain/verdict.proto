@@ -1,15 +1,15 @@
-// 判官裁决协议 [Ref: 04_全链路通信协议矩阵 B]
-// Stage1-02 占位
+// [Ref: 04_全链路通信协议矩阵] 判官裁决协议
+// 代码仓：diting-core/design/protocols/brain/verdict.proto
+
 syntax = "proto3";
 
 package diting.brain;
 
-import "expert.proto";
+import "brain/expert.proto";
 
 message CouncilVerdict {
   string decision_id = 1;
   string symbol = 2;
-
   enum Action {
     ACTION_PASS = 0;
     ACTION_BUY = 1;

@@ -1,31 +1,13 @@
-# 交易执行抽象 [Ref: 05_接口抽象层规约 A]
-# 与 04_全链路通信协议矩阵 execution 对齐；骨架期使用占位类型，逻辑填充期接入 execution_pb2
+# [Ref: 03_原子目标与规约/_共享规约/05_接口抽象层规约] 交易执行抽象
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Dict
 
-# 占位类型，替代 execution_pb2.TradeOrder / OrderStatus，使「导入 + 最小调用」可运行
-@dataclass
-class OrderPlaceholder:
-    """占位订单类型 [Ref: 04_全链路通信协议矩阵 execution]"""
-    symbol: str
-    quantity: int
-    price: float
-    order_id: str = ""
-
-
-@dataclass
-class OrderStatusPlaceholder:
-    """占位订单状态 [Ref: 04_全链路通信协议矩阵]"""
-    order_id: str
-    status: str  # e.g. PENDING, FILLED, CANCELLED
+# 占位阶段使用本地 stub；正式由 design/protocols/execution/order.proto 生成
+from diting.protocols.execution_pb2 import TradeOrder, OrderStatus
 
 
 class BrokerDriver(ABC):
-    """
-    交易网关的标准接口 [Ref: 05_接口抽象层规约]。
-    无论是 MiniQMT, PTrade 还是回测引擎，都必须实现此接口。
-    """
+    """交易网关的标准接口。研产同构、经纪商解耦。"""
 
     @abstractmethod
     def get_cash_balance(self) -> float:
@@ -34,12 +16,12 @@ class BrokerDriver(ABC):
 
     @abstractmethod
     def get_positions(self) -> Dict[str, int]:
-        """获取当前持仓 :return: {symbol: quantity}"""
+        """获取当前持仓。返回 {symbol: quantity}"""
         pass
 
     @abstractmethod
-    def place_order(self, order: OrderPlaceholder) -> str:
-        """下单接口 :param order: 订单对象 :return: order_id"""
+    def place_order(self, order: TradeOrder) -> str:
+        """下单接口。返回 order_id（系统内部ID）"""
         pass
 
     @abstractmethod
@@ -48,6 +30,6 @@ class BrokerDriver(ABC):
         pass
 
     @abstractmethod
-    def get_order_status(self, order_id: str) -> OrderStatusPlaceholder:
-        """查询订单状态"""
+    def get_order_status(self, order_id: str) -> OrderStatus:
+        """查询订单状态（用于异步轮询）"""
         pass

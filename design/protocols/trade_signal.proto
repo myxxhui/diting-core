@@ -1,0 +1,18 @@
+// [Ref: 01_核心公式与MoE架构规约] 全链路 TradeSignal 协议
+// 代码仓：diting-core/design/protocols/trade_signal.proto
+
+syntax = "proto3";
+
+package diting.core;
+
+message TradeSignal {
+  string symbol = 1;
+  string strategy_source = 2;
+  double technical_score = 3;
+  double fundamental_score = 4;
+  double win_rate_prediction = 5;
+  double kelly_fraction = 6;
+  string reasoning_summary = 10;
+  string correlation_id = 11;
+  string signal_id = 12;
+}

@@ -1,12 +1,25 @@
-// Module A 语义分类器输出 [Ref: 04_全链路通信协议矩阵 Module A/B]
-// Stage1-02 占位；Domain Tag、置信度
+// [Ref: 09_核心模块架构规约] Module A 语义分类器输出
+// 代码仓：diting-core/design/protocols/classifier/classifier_output.proto
+
 syntax = "proto3";
 
 package diting.classifier;
 
+enum DomainTag {
+  DOMAIN_UNSPECIFIED = 0;
+  AGRI = 1;
+  TECH = 2;
+  GEO = 3;
+  UNKNOWN = 4;
+}
+
 message ClassifierOutput {
   string symbol = 1;
-  string domain_tag = 2;   // AGRI / TECH / GEO / UNKNOWN
-  double confidence = 3;  // 0.0 - 1.0
-  string correlation_id = 4;
+  repeated TagWithConfidence tags = 2;
+  string correlation_id = 3;
+}
+
+message TagWithConfidence {
+  DomainTag domain_tag = 1;
+  double confidence = 2;
 }

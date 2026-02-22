@@ -2,11 +2,8 @@
 # 与 04_/05_ 规约对齐；骨架期验证「导入 + 最小调用」可运行
 import pytest
 
-from diting.abstraction.broker import (
-    BrokerDriver,
-    OrderPlaceholder,
-    OrderStatusPlaceholder,
-)
+from diting.abstraction.broker import BrokerDriver
+from diting.protocols.execution_pb2 import TradeOrder, OrderStatus
 from diting.abstraction.brain import CognitiveEngine
 from diting.abstraction.feed import MarketDataFeed
 from diting.abstraction.mock_broker import MockBroker
@@ -31,7 +28,7 @@ def test_mock_broker_get_cash_balance(initial_cash: float, expected: float) -> N
 ])
 def test_mock_broker_place_order(order_symbol: str, order_qty: int, order_price: float) -> None:
     broker = MockBroker(initial_cash=10000.0)
-    order = OrderPlaceholder(symbol=order_symbol, quantity=order_qty, price=order_price)
+    order = TradeOrder(symbol=order_symbol, quantity=order_qty, price=order_price)
     order_id = broker.place_order(order)
     assert order_id.startswith("mock_")
     status = broker.get_order_status(order_id)
@@ -41,7 +38,7 @@ def test_mock_broker_place_order(order_symbol: str, order_qty: int, order_price:
 
 def test_mock_broker_cancel_order() -> None:
     broker = MockBroker()
-    order = OrderPlaceholder(symbol="000001.SZ", quantity=100, price=10.0)
+    order = TradeOrder(symbol="000001.SZ", quantity=100, price=10.0)
     order_id = broker.place_order(order)
     assert broker.cancel_order(order_id) is True
     assert broker.get_order_status(order_id).status == "CANCELLED"

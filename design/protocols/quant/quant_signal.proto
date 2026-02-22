@@ -1,13 +1,21 @@
-// Module B 量化扫描引擎输出 [Ref: 04_全链路通信协议矩阵 Module A/B]
-// Stage1-02 占位；technical_score、strategy_source、sector_strength
+// [Ref: 09_核心模块架构规约] Module B 量化扫描引擎输出
+// 代码仓：diting-core/design/protocols/quant/quant_signal.proto
+
 syntax = "proto3";
 
 package diting.quant;
 
+enum StrategyPool {
+  STRATEGY_UNSPECIFIED = 0;
+  TREND = 1;
+  REVERSION = 2;
+  BREAKOUT = 3;
+}
+
 message QuantSignal {
   string symbol = 1;
-  double technical_score = 2;   // 0-100
-  string strategy_source = 3;  // 策略池来源
-  double sector_strength = 4;   // 板块强度
+  double technical_score = 2;
+  StrategyPool strategy_source = 3;
+  double sector_strength = 4;
   string correlation_id = 5;
 }
