@@ -1,0 +1,25 @@
+# Stage2-02 采集镜像 [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile.md]
+# 显式安装 akshare、openbb-platform（dna_stage2_02.integration_packages）；镜像内 make ingest-test 须退出码 0
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 系统依赖（psycopg2、make 供 make ingest-test）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    make \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# 采集依赖：显式 akshare、openbb-platform
+COPY requirements-ingest.txt ./
+RUN pip install --no-cache-dir -r requirements-ingest.txt
+
+# 项目代码（供 make ingest-test 使用；run_ingest_test.py 将项目根加入 sys.path）
+COPY . .
+
+# 默认执行采集测试（运行时可通过 env 注入 TIMESCALE_DSN、PG_L2_DSN）
+# 构建后验证：docker run --env-file .env <image> make ingest-test
+CMD ["make", "ingest-test"]
