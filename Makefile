@@ -14,15 +14,16 @@ test-docker:
 	@echo "Docker test (placeholder)"
 	@exit 0
 
-# Stage2-01 下游验证：使用 .env 中 TIMESCALE_DSN 连接 L1 并对 init 所建表执行查询；退出码 0 表示 V7 通过
+# Stage2-01 下游验证：使用 .env 中 TIMESCALE_DSN（及可选 PG_L2_DSN）连接并对 init 所建表查询；退出码 0 表示 V-DB 通过（不依赖主机 psql）
 verify-db-connection:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
-	. "$$root/.env" 2>/dev/null || true; \
-	if [ -z "$$TIMESCALE_DSN" ]; then echo "TIMESCALE_DSN not set (copy .env.template to .env and fill)"; exit 1; fi; \
-	psql "$$TIMESCALE_DSN" -v ON_ERROR_STOP=1 -c "SELECT 1" && psql "$$TIMESCALE_DSN" -v ON_ERROR_STOP=1 -c "\\dt" | grep -q ohlcv && echo "verify-db-connection OK"
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/verify_db_connection.py
 
 # Stage2-02 采集逻辑验证：执行 ingest_ohlcv、ingest_industry_revenue、ingest_news；退出码 0 表示通过。需先 make verify-db-connection。
 ingest-test:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
-	. "$$root/.env" 2>/dev/null || true; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/run_ingest_test.py
+
+# ---------- Stage2 本地实践：L1/L2 编排与建表归属 diting-infra（02_三位一体仓库规约）----------
+# 请在 diting-infra 执行 make local-deps-up、make local-deps-init 后，在本仓配置 .env 指向 localhost:15432/15433，再执行 verify-db-connection、ingest-test。回收时在 diting-infra 执行 make local-deps-down。

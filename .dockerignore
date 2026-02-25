@@ -1,0 +1,12 @@
+# 不打包进镜像，运行时由 -e 或挂载提供
+.env
+.env.ingest.local
+.git
+.gitignore
+*.pyc
+__pycache__
+.pytest_cache
+.venv
+venv
+*.md
+.cursorrules

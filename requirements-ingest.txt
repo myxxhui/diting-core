@@ -1,5 +1,5 @@
 # Stage2-02 采集镜像依赖 [Ref: dna_stage2_02.integration_packages]
-# 显式安装 akshare、openbb-platform；构建后镜像内 make ingest-test 须可运行
+# 显式安装 akshare、openbb-platform（DNA）；PyPI 主包名为 openbb，即 OpenBB Platform
 
 akshare>=1.12.0
 openbb>=4.0.0
