@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify-db-connection ingest-test
+.PHONY: test build test-docker verify-db-connection ingest-test build-images
 
 test:
 	@cd "$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))" && (python3 -m pytest tests/ -v --tb=short 2>/dev/null || python3 tests/unit/test_abstraction.py)
@@ -24,6 +24,13 @@ ingest-test:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/run_ingest_test.py
+
+# Stage2-02 一键构建本阶段所涉全部镜像 [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile.md V-BUILD-ALL]
+# 当前仅采集镜像；后续若有新增镜像在此追加即可。
+build-images:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	cd "$$root" && docker build -f Dockerfile.ingest -t diting-ingest:test .
+	@echo "build-images: diting-ingest:test OK"
 
 # ---------- Stage2 本地实践：L1/L2 编排与建表归属 diting-infra（02_三位一体仓库规约）----------
 # 请在 diting-infra 执行 make local-deps-up、make local-deps-init 后，在本仓配置 .env 指向 localhost:15432/15433，再执行 verify-db-connection、ingest-test。回收时在 diting-infra 执行 make local-deps-down。

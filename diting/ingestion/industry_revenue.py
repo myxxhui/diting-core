@@ -3,12 +3,11 @@
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
 import psycopg2
-
-import akshare as ak
 
 from diting.ingestion.config import get_pg_l2_dsn
 from diting.ingestion.l2_writer import write_data_version
@@ -20,12 +19,18 @@ DEFAULT_SYMBOL = "000001"
 DATA_TYPE = "industry_revenue"
 
 
+def _is_mock() -> bool:
+    return os.environ.get("DITING_INGEST_MOCK", "").strip().lower() in ("1", "true", "yes")
+
+
 def _fetch_akshare_financial_abstract(
     symbol: str,
     max_retries: int = 3,
     retry_delay: float = 2.0,
 ):
     """AkShare 股票财务摘要；错误与限流：重试+退避。"""
+    import akshare as ak
+
     for attempt in range(max_retries):
         try:
             df = ak.stock_financial_abstract(symbol=symbol)
@@ -42,43 +47,57 @@ def _fetch_akshare_financial_abstract(
 def run_ingest_industry_revenue(symbol: str = None) -> int:
     """
     执行 ingest_industry_revenue：从 AkShare 拉取财务摘要并写入 L2 data_versions。
-    工作目录: diting-core
+    工作目录: diting-core。DITING_INGEST_MOCK=1 时写入一条 mock 版本。
     """
     symbol = symbol or DEFAULT_SYMBOL
-    df = _fetch_akshare_financial_abstract(symbol)
-    if df is None or df.empty:
-        logger.warning("ingest_industry_revenue: no data for symbol=%s", symbol)
-        return 0
-
-    # 版本化：data_type + version_id；07_ 规约 version 格式可含 timestamp
     now = datetime.now(timezone.utc)
     version_id = f"industry_revenue_{symbol}_{now.strftime('%Y%m%d%H%M%S')}"
-    # 逻辑路径：L2 侧仅存元数据，实际内容可存 L3；此处用占位路径表示「已采集」
     file_path = f"l2/industry_revenue/{symbol}.json"
-    # 将摘要首行序列化为占位内容（可选：仅存元数据也可）
-    try:
-        first = df.iloc[0].to_dict()
-        for k, v in first.items():
-            if hasattr(v, "isoformat"):
-                first[k] = v.isoformat()
-        payload = json.dumps(first, ensure_ascii=False, default=str)
-        file_size = len(payload.encode("utf-8"))
-    except Exception:
-        payload = "{}"
-        file_size = 0
 
-    dsn = get_pg_l2_dsn()
-    conn = psycopg2.connect(dsn)
-    try:
-        write_data_version(
-            conn,
-            data_type=DATA_TYPE,
-            version_id=version_id,
-            timestamp=now,
-            file_path=file_path,
-            file_size=file_size,
-            checksum="",
-        )
-        return 1
-    finally:
-        conn.close()
+    if _is_mock():
+        file_size = len(b'{"mock": true}')
+        dsn = get_pg_l2_dsn()
+        conn = psycopg2.connect(dsn)
+        try:
+            write_data_version(
+                conn,
+                data_type=DATA_TYPE,
+                version_id=version_id,
+                timestamp=now,
+                file_path=file_path,
+                file_size=file_size,
+                checksum="",
+            )
+            logger.info("ingest_industry_revenue: mock mode, 1 version")
+            return 1
+        finally:
+            conn.close()
+    else:
+        df = _fetch_akshare_financial_abstract(symbol)
+        if df is None or df.empty:
+            logger.warning("ingest_industry_revenue: no data for symbol=%s", symbol)
+            return 0
+        try:
+            first = df.iloc[0].to_dict()
+            for k, v in first.items():
+                if hasattr(v, "isoformat"):
+                    first[k] = v.isoformat()
+            payload = json.dumps(first, ensure_ascii=False, default=str)
+            file_size = len(payload.encode("utf-8"))
+        except Exception:
+            file_size = 0
+        dsn = get_pg_l2_dsn()
+        conn = psycopg2.connect(dsn)
+        try:
+            write_data_version(
+                conn,
+                data_type=DATA_TYPE,
+                version_id=version_id,
+                timestamp=now,
+                file_path=file_path,
+                file_size=file_size,
+                checksum="",
+            )
+            return 1
+        finally:
+            conn.close()

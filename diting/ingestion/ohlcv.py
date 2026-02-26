@@ -2,7 +2,8 @@
 # ingest_ohlcv：AkShare A 股日线 → L1 ohlcv
 
 import logging
-from datetime import datetime, timedelta
+import os
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 
@@ -14,6 +15,11 @@ logger = logging.getLogger(__name__)
 # 逻辑填充期：ingest-test 目标 symbol 与 period（见 docs/ingest-test-target.md）
 DEFAULT_SYMBOLS = ["000001", "600000"]  # 平安银行(SZ)、浦发银行(SH)
 DEFAULT_PERIOD = "daily"
+
+
+def _is_mock() -> bool:
+    """DITING_INGEST_MOCK=1 时使用本地 mock 数据，不请求外网（CI/无外网环境）。"""
+    return os.environ.get("DITING_INGEST_MOCK", "").strip().lower() in ("1", "true", "yes")
 
 
 def _symbol_to_ts(symbol: str) -> str:
@@ -105,6 +111,22 @@ def _fetch_akshare_ohlcv(
     return []
 
 
+def _mock_ohlcv_rows(symbols: list, period: str, days: int = 15) -> list:
+    """Mock 数据：与 docs/ingest-test-target.md 约定一致，供无外网时 V-INGEST/V-DATA 验证。"""
+    rows = []
+    end = datetime.now(timezone.utc)
+    for sym in symbols:
+        sym_ts = _symbol_to_ts(sym)
+        for i in range(days):
+            dt = end - timedelta(days=days - 1 - i)
+            dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            base = 10.0 + (hash(sym) % 100) / 10.0
+            rows.append(
+                (sym_ts, period, dt, base, base + 0.5, base - 0.2, base + 0.1, 1000000 + i * 1000)
+            )
+    return rows
+
+
 def run_ingest_ohlcv(
     symbols: list = None,
     period: str = DEFAULT_PERIOD,
@@ -113,25 +135,28 @@ def run_ingest_ohlcv(
     """
     执行 ingest_ohlcv：从 AkShare 拉取 A 股日线并写入 L1 ohlcv。
     工作目录: diting-core（由 Makefile / 调用方保证）
+    DITING_INGEST_MOCK=1 时写入 mock 数据，不请求外网。
     """
     symbols = symbols or DEFAULT_SYMBOLS
-    end = datetime.utcnow()
-    start = end - timedelta(days=days_back)
-    start_str = start.strftime("%Y%m%d")
-    end_str = end.strftime("%Y%m%d")
-
-    all_rows = []
-    for sym in symbols:
-        try:
-            rows = _fetch_akshare_ohlcv(sym, period, start_str, end_str)
-            all_rows.extend(rows)
-        except Exception as e:
-            logger.exception("ingest_ohlcv symbol=%s failed: %s", sym, e)
-            raise
-
-    if not all_rows:
-        logger.warning("ingest_ohlcv: no rows fetched for symbols=%s", symbols)
-        return 0
+    if _is_mock():
+        all_rows = _mock_ohlcv_rows(symbols, period, days=15)
+        logger.info("ingest_ohlcv: mock mode, %s rows", len(all_rows))
+    else:
+        end = datetime.utcnow()
+        start = end - timedelta(days=days_back)
+        start_str = start.strftime("%Y%m%d")
+        end_str = end.strftime("%Y%m%d")
+        all_rows = []
+        for sym in symbols:
+            try:
+                rows = _fetch_akshare_ohlcv(sym, period, start_str, end_str)
+                all_rows.extend(rows)
+            except Exception as e:
+                logger.exception("ingest_ohlcv symbol=%s failed: %s", sym, e)
+                raise
+        if not all_rows:
+            logger.warning("ingest_ohlcv: no rows fetched for symbols=%s", symbols)
+            return 0
 
     dsn = get_timescale_dsn()
     conn = psycopg2.connect(dsn)

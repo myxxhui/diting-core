@@ -3,6 +3,7 @@
 # ingest_news：AkShare 国内部分 + OpenBB 国际/宏观 → L2 data_versions
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
@@ -14,6 +15,10 @@ from diting.ingestion.l2_writer import write_data_version
 logger = logging.getLogger(__name__)
 
 DATA_TYPE_NEWS = "news"
+
+
+def _is_mock() -> bool:
+    return os.environ.get("DITING_INGEST_MOCK", "").strip().lower() in ("1", "true", "yes")
 
 
 def _fetch_akshare_news(max_retries: int = 3, retry_delay: float = 2.0) -> list:
@@ -69,7 +74,7 @@ def _fetch_openbb_macro_or_news(max_retries: int = 2, retry_delay: float = 2.0) 
 def run_ingest_news() -> int:
     """
     执行 ingest_news：国内 AkShare + 国际 OpenBB，写入 L2 data_versions。
-    工作目录: diting-core
+    工作目录: diting-core。DITING_INGEST_MOCK=1 时写入两条 mock 版本（akshare + openbb）。
     """
     written = 0
     now = datetime.now(timezone.utc)
@@ -77,6 +82,32 @@ def run_ingest_news() -> int:
     conn = psycopg2.connect(dsn)
 
     try:
+        if _is_mock():
+            version_id_ak = f"news_akshare_{now.strftime('%Y%m%d%H%M%S')}"
+            write_data_version(
+                conn,
+                data_type=DATA_TYPE_NEWS,
+                version_id=version_id_ak,
+                timestamp=now,
+                file_path="l2/news/akshare_latest.json",
+                file_size=0,
+                checksum="",
+            )
+            written += 1
+            version_id_ob = f"news_openbb_{now.strftime('%Y%m%d%H%M%S')}"
+            write_data_version(
+                conn,
+                data_type=DATA_TYPE_NEWS,
+                version_id=version_id_ob,
+                timestamp=now,
+                file_path="l2/news/openbb_macro.json",
+                file_size=0,
+                checksum="",
+            )
+            written += 1
+            logger.info("ingest_news: mock mode, %s versions", written)
+            return written
+
         # 国内：AkShare 最新资讯
         try:
             records = _fetch_akshare_news()
