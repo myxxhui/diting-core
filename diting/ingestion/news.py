@@ -1,4 +1,4 @@
-# [Ref: 03_原子目标与规约/Stage2_数据采集与存储/02_采集逻辑与Dockerfile设计.md#design-stage2-02-integration-akshare]
+# [Ref: 03_原子目标与规约/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_设计.md#design-stage2-02-integration-akshare]
 # [Ref: design-stage2-02-integration-openbb]
 # ingest_news：AkShare 国内部分 + OpenBB 国际/宏观 → L2 data_versions
 

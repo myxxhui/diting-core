@@ -1,5 +1,5 @@
-# Stage2-02 采集镜像 [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile.md]
-# 显式安装 akshare、openbb-platform（dna_stage2_02.integration_packages）；镜像内 make ingest-test 须退出码 0
+# Stage2-02 采集镜像 [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_实践.md]
+# 显式安装 akshare、openbb-platform（02_dna_采集逻辑与Dockerfile.integration_packages）；镜像内 make ingest-test 须退出码 0
 
 FROM python:3.11-slim
 

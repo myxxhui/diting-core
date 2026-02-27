@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile.md]
+# [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_实践.md]
 # 工作目录: diting-core。使用 .env 中 TIMESCALE_DSN（及可选 PG_L2_DSN）校验 L1/L2 表存在；退出码 0 表示 V-DB 通过。
 
 import os

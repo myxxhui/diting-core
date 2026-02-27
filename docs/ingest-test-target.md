@@ -1,6 +1,6 @@
 # ingest-test 目标数据约定
 
-> [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile.md#l4-stage2-02-target-data]  
+> [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_实践.md#l4-stage2-02-target-data]  
 > 本文档约定 `make ingest-test` 会采集的**目标数据**，验收时据此对照验证查询结果。
 
 ## L1 OHLCV

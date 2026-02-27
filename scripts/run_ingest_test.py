@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile.md]
+# [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_实践.md]
 # 工作目录: diting-core。执行 ingest_ohlcv、ingest_industry_revenue、ingest_news；退出码 0 表示通过。
 
 import logging

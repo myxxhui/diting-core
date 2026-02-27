@@ -1,0 +1,27 @@
+# [Ref: 01_语义分类器] [Ref: dna_module_a.classification_rules]
+# 分类规则由 YAML 驱动，禁止在代码中硬编码；与 09_ Module A、DNA 语义一致。
+
+# AGRI: 申万行业=农林牧渔 或 营收占比>50%
+agri:
+  industry_keywords:
+    - 农林牧渔
+  revenue_ratio_threshold: 0.5   # 主营营收占比超过此值可归为 AGRI
+
+# TECH: 申万行业=电子/计算机/通信 或 研发投入>10%
+tech:
+  industry_keywords:
+    - 电子
+    - 计算机
+    - 通信
+  rnd_ratio_threshold: 0.1       # 研发投入占比超过此值可归为 TECH
+
+# GEO: 申万行业=有色金属/石油石化 或 大宗商品营收>50%
+geo:
+  industry_keywords:
+    - 有色金属
+    - 石油石化
+  commodity_revenue_ratio_threshold: 0.5
+
+# UNKNOWN: 无法匹配上述规则时的默认出口
+unknown:
+  default_confidence: 0.5

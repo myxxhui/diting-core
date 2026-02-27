@@ -1,4 +1,4 @@
-# Stage2-02 采集镜像依赖 [Ref: dna_stage2_02.integration_packages]
+# Stage2-02 采集镜像依赖 [Ref: 02_dna_采集逻辑与Dockerfile.integration_packages]
 # 显式安装 akshare、openbb-platform（DNA）；PyPI 主包名为 openbb，即 OpenBB Platform
 
 akshare>=1.12.0

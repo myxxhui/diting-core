@@ -1,5 +1,5 @@
 # [Ref: 03_原子目标与规约/_共享规约/11_数据采集与输入层规约]
-# [Ref: dna_stage2_02.yaml required_config]
+# [Ref: 02_dna_采集逻辑与Dockerfile.yaml required_config]
 # 从 .env 或环境变量加载 TIMESCALE_DSN、PG_L2_DSN、REDIS_URL
 
 import os
