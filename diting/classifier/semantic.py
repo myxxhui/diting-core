@@ -1,6 +1,7 @@
-# [Ref: 01_语义分类器] [Ref: 09_核心模块架构规约] Module A 语义分类器实现
-# 输入：标的代码、申万行业、营收占比（来自 L1/L2 或 MarketDataFeed/约定表）；输出：ClassifierOutput
+# [Ref: 01_语义分类器] [Ref: 09_核心模块架构规约] [Ref: 11_数据采集与输入层规约]
+# Module A 语义分类器：标的池由 get_current_a_share_universe() 或调用方传入；对全部 N 只全量分类
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -12,6 +13,8 @@ from diting.protocols.classifier_pb2 import (
     DomainTag,
     TagWithConfidence,
 )
+
+logger = logging.getLogger(__name__)
 
 # 默认规则路径：与 DNA delivery_scope、实践文档约定一致
 DEFAULT_RULES_PATH = "config/classifier_rules.yaml"
@@ -121,6 +124,35 @@ class SemanticClassifier:
             tags=tags_with_conf,
             correlation_id=correlation_id,
         )
+
+    def classify_batch(
+        self,
+        universe: List[str],
+        correlation_id: str = "",
+    ) -> List[ClassifierOutput]:
+        """
+        对标的池全量分类，与 09_/11_ 约定一致；同批与 Module B 使用同一 universe 时由调度保证。
+        """
+        logger.info("classify_batch: len(universe)=%s", len(universe))
+        return [self.classify(s, correlation_id=correlation_id) for s in universe]
+
+    @classmethod
+    def run_full(
+        cls,
+        universe: Optional[List[str]] = None,
+        correlation_id: str = "",
+        **classifier_kwargs,
+    ) -> List[ClassifierOutput]:
+        """
+        执行入口：先通过 get_current_a_share_universe() 获取标的池（或使用调用方传入的 universe），
+        再对全部 N 只全量分类；日志输出 len(universe)。与 11_/09_ 同批一致约定一致。
+        """
+        if universe is None:
+            from diting.universe import get_current_a_share_universe
+            universe = get_current_a_share_universe()
+        logger.info("SemanticClassifier.run_full: len(universe)=%s", len(universe))
+        inst = cls(**classifier_kwargs)
+        return inst.classify_batch(universe, correlation_id=correlation_id)
 
 
 def _default_mock_provider() -> Callable[[str], Tuple[str, float, float, float]]:

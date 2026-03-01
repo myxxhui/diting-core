@@ -156,6 +156,18 @@ def test_custom_provider():
     assert any(t.domain_tag == DomainTag.AGRI for t in out.tags)
 
 
+def test_classify_batch_returns_list_and_logs_universe_size():
+    """classify_batch(universe) 对全列表分类并返回 ClassifierOutput 列表；与 11_ 全量分类一致。"""
+    clf = SemanticClassifier(rules=load_rules())
+    universe = ["000998.SZ", "688981.SH", "601899.SH"]
+    results = clf.classify_batch(universe)
+    assert len(results) == len(universe)
+    for out in results:
+        assert isinstance(out, ClassifierOutput)
+        assert out.symbol in universe
+    assert [r.symbol for r in results] == universe
+
+
 def test_load_rules_from_path():
     """load_rules 可从指定路径加载。"""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:

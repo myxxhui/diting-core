@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify-db-connection ingest-test build-images deps-classifier
+.PHONY: test build test-docker verify verify-db-connection ingest-test build-images deps-classifier diting prod
 
 # 语义分类器单测依赖（无 pip 时用 python3 -m pip）；安装后执行 make test-classifier-cov
 deps-classifier:
@@ -23,10 +23,33 @@ test-docker:
 	@echo "Docker test (placeholder)"
 	@exit 0
 
-# Stage2-01 下游验证：使用 .env 中 TIMESCALE_DSN（及可选 PG_L2_DSN）连接并对 init 所建表查询；退出码 0 表示 V-DB 通过（不依赖主机 psql）
+# make verify [project] [env]：make verify diting prod = 使用 .env 校验 L1/L2 连接与表（生产数据环境验证）
+verify:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/verify_db_connection.py
+
+# 占位目标：make verify diting prod 时不被当作文件
+diting:
+	@true
+prod:
+	@true
+
+# Stage2-01 下游验证：与 make verify diting prod 同逻辑；保留兼容
 verify-db-connection:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/verify_db_connection.py
+
+# Stage2-06 生产级数据验收：L1 单标日线≥5 年、标的与 universe 一致；见 06_生产级数据要求_实践
+verify-data-production:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/verify_data_production.py
+
+# 生产级数据数量与质量报告（对照 06_/11_ 与 AB 模块预期，仅输出报告）
+report-production-data:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/check_production_data_report.py
 
 # Stage2-02 采集逻辑验证：执行 ingest_ohlcv、ingest_industry_revenue、ingest_news；退出码 0 表示通过。需先 make verify-db-connection。
 ingest-test:

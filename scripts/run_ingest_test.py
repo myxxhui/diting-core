@@ -12,7 +12,12 @@ root = Path(__file__).resolve().parents[1]
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
-from diting.ingestion import run_ingest_ohlcv, run_ingest_industry_revenue, run_ingest_news
+from diting.ingestion import (
+    run_ingest_ohlcv,
+    run_ingest_industry_revenue,
+    run_ingest_news,
+    run_ingest_universe,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -23,6 +28,7 @@ def main() -> int:
         run_ingest_ohlcv()
         run_ingest_industry_revenue()
         run_ingest_news()
+        run_ingest_universe()
         logger.info("ingest-test OK")
         return 0
     except Exception as e:
