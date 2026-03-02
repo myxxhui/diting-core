@@ -1,5 +1,5 @@
 # Stage2-02 采集镜像 [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_实践.md]
-# 显式安装 akshare、openbb-platform（02_dna_采集逻辑与Dockerfile.integration_packages）；镜像内 make ingest-test 须退出码 0
+# 镜像内须具备 Python >=3.8、akshare、psycopg2、redis、pandas 等；与 make deps-ingest 一致：akshare 1.17.1 --no-deps + requirements-ingest-core，避免 curl_cffi 0.13 在部分环境不可用
 
 FROM python:3.11-slim
 
@@ -13,9 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# 采集依赖：显式 akshare、openbb-platform
-COPY requirements-ingest.txt ./
-RUN pip install --no-cache-dir -r requirements-ingest.txt
+# 采集依赖：先装 akshare 无依赖，再装运行时依赖（与 make deps-ingest 一致）
+COPY requirements-ingest-core.txt ./
+RUN pip install --no-cache-dir --no-deps akshare==1.17.1 && \
+    pip install --no-cache-dir -r requirements-ingest-core.txt
 
 # 项目代码（供 make ingest-test 使用；run_ingest_test.py 将项目根加入 sys.path）
 COPY . .

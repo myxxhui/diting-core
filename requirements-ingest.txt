@@ -1,7 +1,9 @@
 # Stage2-02 采集镜像依赖 [Ref: 02_dna_采集逻辑与Dockerfile.integration_packages]
 # 显式安装 akshare、openbb-platform（DNA）；PyPI 主包名为 openbb，即 OpenBB Platform
+# 环境要求：Python >= 3.8（akshare 要求），且能访问 PyPI
+# akshare>=1.18 及 1.17.2+ 部分版本依赖 curl_cffi>=0.13，部分环境无对应 wheel；deps-ingest 使用 akshare==1.17.1 --no-deps
 
-akshare>=1.12.0
+akshare>=1.12.0,<1.18
 openbb>=4.0.0
 psycopg2-binary>=2.9.0
 redis>=4.5.0

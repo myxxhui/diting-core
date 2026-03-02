@@ -14,6 +14,11 @@ logger = logging.getLogger(__name__)
 
 # 逻辑填充期：ingest-test 目标 symbol 与 period（见 docs/ingest-test-target.md）
 DEFAULT_SYMBOLS = ["000001", "600000"]  # 平安银行(SZ)、浦发银行(SH)
+# 测试集 15 标（少量真实行情）：生产数据环境步骤 3、7 使用真实 AkShare 拉取
+REAL_TEST_SYMBOLS_15 = [
+    "000001", "600000", "000002", "600519", "000858", "601318", "000333", "600036",
+    "002594", "601012", "000725", "300750", "603259", "688981", "300059",
+]
 DEFAULT_PERIOD = "daily"
 
 
@@ -135,13 +140,15 @@ def run_ingest_ohlcv(
     """
     执行 ingest_ohlcv：从 AkShare 拉取 A 股日线并写入 L1 ohlcv。
     工作目录: diting-core（由 Makefile / 调用方保证）
-    DITING_INGEST_MOCK=1 时写入 mock 数据，不请求外网。
+    真实模式（未设置 DITING_INGEST_MOCK）：symbols 为空时使用 REAL_TEST_SYMBOLS_15（约 15 标），拉取真实行情。
+    DITING_INGEST_MOCK=1 时写入 mock 数据（仅用于非生产流水线，如 CI/无外网）。
     """
-    symbols = symbols or DEFAULT_SYMBOLS
     if _is_mock():
+        symbols = symbols or DEFAULT_SYMBOLS
         all_rows = _mock_ohlcv_rows(symbols, period, days=15)
         logger.info("ingest_ohlcv: mock mode, %s rows", len(all_rows))
     else:
+        symbols = symbols or REAL_TEST_SYMBOLS_15
         end = datetime.utcnow()
         start = end - timedelta(days=days_back)
         start_str = start.strftime("%Y%m%d")
