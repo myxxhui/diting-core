@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production ingest-test ingest-test-real ingest-production deps-ingest build-images deps-classifier diting prod
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production ingest-test ingest-deploy ingest-test-real ingest-production deps-ingest build-images deps-classifier diting prod
 
 # 采集相关 target 使用的 Python：akshare 要求 >= 3.8，优先 python3.8（若已安装）
 PYTHON_INGEST := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
@@ -81,6 +81,12 @@ ingest-test-real:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && INGEST_FORBID_MOCK=1 PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_test.py
 
+# 部署时采集：检查 L1 是否有数据/是否过期，自动选择全量或增量（见 scripts/run_ingest_deploy.py）
+ingest-deploy:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) python3 scripts/run_ingest_deploy.py
+
 # Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线；步骤 8 必须用本 target，禁止用 ingest-test 代替。
 ingest-production:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
@@ -93,6 +99,20 @@ build-images:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	cd "$$root" && docker build -f Dockerfile.ingest -t diting-ingest:test .
 	@echo "build-images: diting-ingest:test OK"
+
+# Stage2-06 本地构建并推送到项目 ACR；Chart 默认使用 latest [Ref: 06_生产级数据要求_实践.md]
+# 需先配置环境变量 DITING_ACR_PASSWORD，或已 docker login 对应 registry。
+# ACR 地址：crpi-7vifw4ok9jkcxr60.cn-hongkong.personal.cr.aliyuncs.com/titan-core/ ；用户名：sean_hui
+ACR_REGISTRY ?= crpi-7vifw4ok9jkcxr60.cn-hongkong.personal.cr.aliyuncs.com
+ACR_REPO ?= titan-core/diting-ingest
+ACR_USERNAME ?= sean_hui
+ACR_IMAGE := $(ACR_REGISTRY)/$(ACR_REPO):latest
+push-images: build-images
+	@docker tag diting-ingest:test $(ACR_IMAGE); \
+	if [ -n "$$DITING_ACR_PASSWORD" ]; then \
+	  echo "$$DITING_ACR_PASSWORD" | docker login $(ACR_REGISTRY) -u $(ACR_USERNAME) --password-stdin; \
+	fi; \
+	docker push $(ACR_IMAGE) && echo "push-images: $(ACR_IMAGE) OK"
 
 # ---------- Stage2 本地实践：L1/L2 编排与建表归属 diting-infra（02_三位一体仓库规约）----------
 # 请在 diting-infra 执行 make local-deps-up、make local-deps-init 后，在本仓配置 .env 指向 localhost:15432/15433，再执行 verify-db-connection、ingest-test。回收时在 diting-infra 执行 make local-deps-down。
