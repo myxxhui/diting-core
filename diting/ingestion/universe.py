@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Tuple, Optional
 
 import psycopg2
+from psycopg2.extras import execute_values
 
 from diting.ingestion.config import get_timescale_dsn
 
@@ -54,20 +55,20 @@ def write_universe_batch(
     cur = conn.cursor()
     try:
         cur.execute(f"DELETE FROM {TABLE_NAME}")
+        # 使用 execute_values 批量写入，避免 5000+ 次逐行 round-trip（远程库时显著加速）
         sql = f"""
         INSERT INTO {TABLE_NAME} (symbol, market, updated_at, count, source)
-        VALUES (%s, %s, %s, %s, %s)
+        VALUES %s
         ON CONFLICT (symbol) DO UPDATE SET
             market = EXCLUDED.market,
             updated_at = EXCLUDED.updated_at,
             count = EXCLUDED.count,
             source = EXCLUDED.source
         """
-        # 统一使用传入的 ts 作为本批 updated_at
         batch = [(r[0], r[1], ts, r[3] if len(r) > 3 else None, r[4] if len(r) > 4 else None) for r in rows]
-        cur.executemany(sql, batch)
+        execute_values(cur, sql, batch, page_size=1000)
         conn.commit()
-        n = cur.rowcount
+        n = len(batch)
         logger.info("write_universe_batch: refreshed %s rows, updated_at=%s", n, ts)
         return n
     finally:
@@ -147,10 +148,12 @@ def run_ingest_universe() -> int:
         rows = _mock_universe_rows()
         logger.info("run_ingest_universe: mock mode, %s symbols", len(rows))
     else:
+        logger.info("universe：正在从东方财富拉取全 A 股列表…")
         rows = _fetch_akshare_universe()
         if not rows:
             logger.warning("run_ingest_universe: no symbols fetched")
             return 0
+        logger.info("universe：已拉取 %s 只标的，正在写入数据库…", len(rows))
 
     dsn = get_timescale_dsn()
     conn = psycopg2.connect(dsn)

@@ -20,7 +20,7 @@ if env_file.exists():
 try:
     import psycopg2
 except ImportError:
-    print("psycopg2 not installed", file=sys.stderr)
+    print("未安装 psycopg2", file=sys.stderr)
     sys.exit(1)
 
 TIMESCALE_DSN = os.environ.get("TIMESCALE_DSN")
@@ -35,13 +35,13 @@ def _is_test_scope() -> bool:
 
 def main() -> int:
     if not TIMESCALE_DSN:
-        print("TIMESCALE_DSN not set (use .env or prod-data-env.conn)", file=sys.stderr)
+        print("未设置 TIMESCALE_DSN（请使用 .env 或 prod.conn）", file=sys.stderr)
         return 1
     try:
         conn = psycopg2.connect(TIMESCALE_DSN)
         conn.autocommit = True
     except Exception as e:
-        print(f"L1 connect failed: {e}", file=sys.stderr)
+        print(f"L1 连接失败: {e}", file=sys.stderr)
         return 1
 
     test_scope = _is_test_scope()
@@ -53,7 +53,7 @@ def main() -> int:
                 "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'ohlcv'"
             )
             if cur.fetchone() is None:
-                print("L1: table ohlcv not found", file=sys.stderr)
+                print("L1：未找到 ohlcv 表", file=sys.stderr)
                 return 1
 
             # 单标 bar 数（按 symbol 聚合）
@@ -64,21 +64,21 @@ def main() -> int:
             """)
             rows = cur.fetchall()
             if not rows:
-                print("L1: no data in ohlcv", file=sys.stderr)
+                print("L1：ohlcv 表无数据", file=sys.stderr)
                 return 1
 
             min_bars = min(r[1] for r in rows)
             num_symbols = len(rows)
             if min_bars < min_bars_required:
                 print(
-                    f"L1: 单标最小 bar 数 {min_bars} < 要求 {min_bars_required}",
+                    f"L1：单标最小 K 线数 {min_bars} < 要求 {min_bars_required}",
                     file=sys.stderr,
                 )
                 return 1
             if test_scope:
-                print(f"L1 (测试集): {num_symbols} 标, 单标最小 bar 数 {min_bars} >= {min_bars_required} OK")
+                print(f"L1（测试集）：{num_symbols} 只标的，单标最小 K 线数 {min_bars} >= {min_bars_required}，通过")
             else:
-                print(f"L1: 单标最小 bar 数 {min_bars} >= {MIN_BARS_5_YEARS} OK")
+                print(f"L1：单标最小 K 线数 {min_bars} >= 5 年要求 {MIN_BARS_5_YEARS}，通过")
 
             # 全量生产级：若存在 a_share_universe 表则校验标的一致；测试集模式仅确认有数据
             cur.execute(
@@ -91,20 +91,20 @@ def main() -> int:
                 universe_count = cur.fetchone()[0]
                 if test_scope:
                     if universe_count == 0:
-                        print("L1 (测试集): a_share_universe 表无数据，跳过标的口径校验")
+                        print("L1（测试集）：a_share_universe 表无数据，跳过标的口径校验")
                     else:
-                        print(f"L1 (测试集): ohlcv {ohlcv_symbols} 标, universe {universe_count} 行 OK")
+                        print(f"L1（测试集）：ohlcv {ohlcv_symbols} 只标的，universe {universe_count} 行，通过")
                 else:
                     if universe_count > 0 and ohlcv_symbols < universe_count:
                         print(
-                            f"a_share_universe 表行数 {universe_count} > ohlcv 标的数 {ohlcv_symbols}",
+                            f"全 A 股标的表行数 {universe_count} 大于 ohlcv 标的数 {ohlcv_symbols}，未全覆盖",
                             file=sys.stderr,
                         )
                         return 1
-                    print("a_share_universe 与 ohlcv 标的口径一致 OK")
+                    print("全 A 股标的表与行情表口径一致，通过")
     finally:
         conn.close()
-    print("verify-data-test OK" if test_scope else "verify-data-production OK")
+    print("测试集数据验证通过" if test_scope else "生产级数据验证通过")
     return 0
 
 

@@ -1,5 +1,9 @@
 # 采集运行时依赖（与 akshare 1.17.x 兼容）；make deps-ingest 会先装 akshare --no-deps 再装本文件
 # [Ref: 06_生产级数据要求_实践]
+# akshare 部分接口（如 stock_zh_a_spot）依赖 aiohttp
+aiohttp>=3.8.0
+# 东方财富接口持续 RemoteDisconnected 时，可设 INGEST_OHLCV_SOURCE=baostock 使用 Baostock 拉取日线
+baostock>=0.8.8
 
 psycopg2-binary>=2.9.0
 redis>=4.5.0

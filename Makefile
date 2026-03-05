@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production ingest-test ingest-deploy ingest-test-real ingest-production deps-ingest build-images deps-classifier diting prod
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images deps-classifier diting prod
 
 # 采集相关 target 使用的 Python：akshare 要求 >= 3.8，优先 python3.8（若已安装）
 PYTHON_INGEST := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
@@ -85,20 +85,41 @@ ingest-test-real:
 ingest-deploy:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
-	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) python3 scripts/run_ingest_deploy.py
+	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_deploy.py
 
-# Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线；步骤 8 必须用本 target，禁止用 ingest-test 代替。
+# Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线；默认启用并发+限速（CONCURRENT=3、RATE=1.5），约 1h 完成 OHLCV。步骤 8 必须用本 target。
 ingest-production:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
-	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
+	cd "$$root" && export INGEST_OHLCV_CONCURRENT=$${INGEST_OHLCV_CONCURRENT:-3} INGEST_OHLCV_RATE_PER_SEC=$${INGEST_OHLCV_RATE_PER_SEC:-1.5} && \
+	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
+
+# 生产级日终增量：全 A 股标的、仅补最近 N 天（默认 7，可设 INGEST_PRODUCTION_INCREMENTAL_DAYS）；建议每个交易日结束后执行，耗时约 1 小时。
+ingest-production-incremental:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && export INGEST_OHLCV_CONCURRENT=$${INGEST_OHLCV_CONCURRENT:-3} INGEST_OHLCV_RATE_PER_SEC=$${INGEST_OHLCV_RATE_PER_SEC:-1.5} && \
+	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production_incremental.py
+
+# 本地加速：全量/日终增量 使用 CONCURRENT=5、RATE=2.0，OHLCV 约 45 min；若出现 RemoteDisconnected 请改用 make ingest-production / make ingest-production-incremental。
+ingest-production-fast:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && export INGEST_OHLCV_CONCURRENT=5 INGEST_OHLCV_RATE_PER_SEC=2.0 && \
+	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
+ingest-production-incremental-fast:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && export INGEST_OHLCV_CONCURRENT=5 INGEST_OHLCV_RATE_PER_SEC=2.0 && \
+	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production_incremental.py
 
 # Stage2-02 一键构建本阶段所涉全部镜像 [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_实践.md V-BUILD-ALL]
-# 当前仅采集镜像；后续若有新增镜像在此追加即可。
+# 当前仅采集镜像；推送到 ACR 供 K3s（多为 linux/amd64）拉取时须指定平台，避免在 Mac ARM 上构建出 arm64 镜像导致节点 exec format error
+DOCKER_PLATFORM ?= linux/amd64
 build-images:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
-	cd "$$root" && docker build -f Dockerfile.ingest -t diting-ingest:test .
-	@echo "build-images: diting-ingest:test OK"
+	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f Dockerfile.ingest -t diting-ingest:test .
+	@echo "build-images: diting-ingest:test OK ($(DOCKER_PLATFORM))"
 
 # Stage2-06 本地构建并推送到项目 ACR；Chart 默认使用 latest [Ref: 06_生产级数据要求_实践.md]
 # 需先配置环境变量 DITING_ACR_PASSWORD，或已 docker login 对应 registry。

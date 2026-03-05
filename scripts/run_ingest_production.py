@@ -34,8 +34,9 @@ def main() -> int:
         return 1
     try:
         import akshare  # noqa: F401
-    except ImportError:
-        logger.error("全量采集依赖 akshare，请先执行：make deps-ingest 或 pip install -r requirements-ingest.txt")
+    except ImportError as e:
+        logger.exception("全量采集 import akshare 失败（镜像内须已 pip install akshare + requirements-ingest-core.txt）: %s", e)
+        logger.error("全量采集依赖 akshare，请先执行：make deps-ingest 或 pip install -r requirements-ingest-core.txt")
         return 1
 
     try:
@@ -59,7 +60,7 @@ def main() -> int:
         run_ingest_industry_revenue()
         run_ingest_news()
 
-        logger.info("ingest-production OK（全A股 + 单标≥5年日线）")
+        logger.info("全量采集完成（全 A 股 + 单标≥5 年日线）")
         return 0
     except Exception as e:
         logger.exception("ingest-production failed: %s", e)

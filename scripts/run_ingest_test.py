@@ -42,7 +42,7 @@ def main() -> int:
         run_ingest_industry_revenue()
         run_ingest_news()
         run_ingest_universe()
-        logger.info("ingest-test OK")
+        logger.info("增量采集（测试集）完成")
         return 0
     except Exception as e:
         logger.exception("ingest-test failed: %s", e)

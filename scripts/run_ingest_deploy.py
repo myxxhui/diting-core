@@ -48,7 +48,18 @@ def need_full_ingest(timescale_dsn: str) -> bool:
                 conn.close()
                 logger.info("L1 表 ohlcv 不存在，需要全量采集")
                 return True
-            cur.execute("SELECT COUNT(*), MAX(datetime)::date FROM ohlcv")
+            # 时间列名可能为 datetime（规约）或 date，从 information_schema 取兼容
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'ohlcv' "
+                "AND data_type IN ('timestamp with time zone', 'timestamp without time zone', 'date') "
+                "ORDER BY ordinal_position LIMIT 1"
+            )
+            time_col_row = cur.fetchone()
+            time_col = (time_col_row[0] if time_col_row else "datetime")
+            if not (time_col and time_col.replace("_", "").isalnum()):
+                time_col = "datetime"
+            cur.execute(f"SELECT COUNT(*), MAX({time_col})::date FROM ohlcv")
             row = cur.fetchone()
         conn.close()
         count, max_date = row[0], row[1]
@@ -75,13 +86,13 @@ def main() -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root)
     if need_full_ingest(timescale_dsn):
-        logger.info("部署采集: 执行全量（ingest-production）")
+        logger.info("部署采集：执行全量（全 A 股 + 5 年日线）")
         r = subprocess.run(
             [sys.executable, str(root / "scripts" / "run_ingest_production.py")],
             cwd=str(root), env=env,
         )
         return r.returncode
-    logger.info("部署采集: 执行增量（ingest-test）")
+    logger.info("部署采集：执行增量（测试集 15 标）")
     r = subprocess.run(
         [sys.executable, str(root / "scripts" / "run_ingest_test.py")],
         cwd=str(root), env=env,
