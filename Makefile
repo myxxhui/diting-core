@@ -87,19 +87,17 @@ ingest-deploy:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_deploy.py
 
-# Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线；默认启用并发+限速（CONCURRENT=3、RATE=1.5），约 1h 完成 OHLCV。步骤 8 必须用本 target。
+# Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线。默认串行+标间延迟（CONCURRENT=1、DELAY=3s）减轻东方财富断连；仍断连可设 INGEST_OHLCV_SOURCE=baostock 或加大 INGEST_OHLCV_DELAY_BETWEEN_SYMBOLS。
+# 不在此处 export 默认值，由脚本加载 .env；未设置的变量才用脚本内默认参数。
 ingest-production:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
-	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
-	cd "$$root" && export INGEST_OHLCV_CONCURRENT=$${INGEST_OHLCV_CONCURRENT:-3} INGEST_OHLCV_RATE_PER_SEC=$${INGEST_OHLCV_RATE_PER_SEC:-1.5} && \
-	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
+	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
 
-# 生产级日终增量：全 A 股标的、仅补最近 N 天（默认 7，可设 INGEST_PRODUCTION_INCREMENTAL_DAYS）；建议每个交易日结束后执行，耗时约 1 小时。
+# 生产级日终增量：全 A 股标的、仅补最近 N 天（默认 7，可设 INGEST_PRODUCTION_INCREMENTAL_DAYS）；建议每个交易日结束后执行。
+# 不在此处 export 默认值，由脚本加载 .env；未设置的变量才用脚本内默认参数。
 ingest-production-incremental:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
-	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
-	cd "$$root" && export INGEST_OHLCV_CONCURRENT=$${INGEST_OHLCV_CONCURRENT:-3} INGEST_OHLCV_RATE_PER_SEC=$${INGEST_OHLCV_RATE_PER_SEC:-1.5} && \
-	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production_incremental.py
+	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production_incremental.py
 
 # 本地加速：全量/日终增量 使用 CONCURRENT=5、RATE=2.0，OHLCV 约 45 min；若出现 RemoteDisconnected 请改用 make ingest-production / make ingest-production-incremental。
 ingest-production-fast:

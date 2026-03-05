@@ -88,6 +88,23 @@ def _symbol_to_ts(code: str) -> str:
     return f"{code}.SZ"
 
 
+def _get_ingest_source() -> str:
+    """INGEST_SOURCE：akshare（默认）或 jqdata。"""
+    raw = (os.environ.get("INGEST_SOURCE") or "akshare").strip().lower()
+    return "jqdata" if raw == "jqdata" else "akshare"
+
+
+def _fetch_jqdata_universe() -> List[Tuple[str, str, datetime, Optional[int], Optional[str]]]:
+    """通过 JQData 获取全 A 股列表；需配置 JQDATA_USER、JQDATA_PASSWORD 并 pip install jqdatasdk。"""
+    try:
+        from diting.ingestion.jqdata_client import get_all_stock_codes
+
+        return get_all_stock_codes()
+    except ImportError:
+        logger.warning("jqdata_client 或 jqdatasdk 不可用，无法使用 JQData 标的源")
+        return []
+
+
 def _fetch_akshare_universe() -> List[Tuple[str, str, datetime, Optional[int], Optional[str]]]:
     """
     通过 AkShare 获取当前全 A 股列表；与 11_ 写入方约定一致。
@@ -148,8 +165,13 @@ def run_ingest_universe() -> int:
         rows = _mock_universe_rows()
         logger.info("run_ingest_universe: mock mode, %s symbols", len(rows))
     else:
-        logger.info("universe：正在从东方财富拉取全 A 股列表…")
-        rows = _fetch_akshare_universe()
+        source = _get_ingest_source()
+        if source == "jqdata":
+            logger.info("universe：正在从 JQData（聚宽）拉取全 A 股列表…")
+            rows = _fetch_jqdata_universe()
+        else:
+            logger.info("universe：正在从东方财富拉取全 A 股列表…")
+            rows = _fetch_akshare_universe()
         if not rows:
             logger.warning("run_ingest_universe: no symbols fetched")
             return 0

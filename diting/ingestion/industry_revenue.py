@@ -23,6 +23,22 @@ def _is_mock() -> bool:
     return os.environ.get("DITING_INGEST_MOCK", "").strip().lower() in ("1", "true", "yes")
 
 
+def _get_ingest_source() -> str:
+    """INGEST_SOURCE：akshare（默认）或 jqdata。"""
+    raw = (os.environ.get("INGEST_SOURCE") or "akshare").strip().lower()
+    return "jqdata" if raw == "jqdata" else "akshare"
+
+
+def _fetch_jqdata_financial(symbol: str):
+    """从 JQData 拉取估值/财务摘要，返回 dict 或 None。"""
+    try:
+        from diting.ingestion.jqdata_client import get_valuation_or_fundamentals
+
+        return get_valuation_or_fundamentals(symbol)
+    except ImportError:
+        return None
+
+
 def _fetch_akshare_financial_abstract(
     symbol: str,
     max_retries: int = 3,
@@ -73,6 +89,35 @@ def run_ingest_industry_revenue(symbol: str = None) -> int:
         finally:
             conn.close()
     else:
+        source = _get_ingest_source()
+        if source == "jqdata":
+            data = _fetch_jqdata_financial(symbol)
+            if not data:
+                logger.warning("ingest_industry_revenue: no jqdata for symbol=%s", symbol)
+                return 0
+            try:
+                for k, v in data.items():
+                    if hasattr(v, "isoformat"):
+                        data[k] = v.isoformat()
+                payload = json.dumps(data, ensure_ascii=False, default=str)
+                file_size = len(payload.encode("utf-8"))
+            except Exception:
+                file_size = 0
+            dsn = get_pg_l2_dsn()
+            conn = psycopg2.connect(dsn)
+            try:
+                write_data_version(
+                    conn,
+                    data_type=DATA_TYPE,
+                    version_id=version_id,
+                    timestamp=now,
+                    file_path=file_path,
+                    file_size=file_size,
+                    checksum="",
+                )
+                return 1
+            finally:
+                conn.close()
         df = _fetch_akshare_financial_abstract(symbol)
         if df is None or df.empty:
             logger.warning("ingest_industry_revenue: no data for symbol=%s", symbol)

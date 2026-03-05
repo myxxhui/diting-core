@@ -92,9 +92,53 @@ def _symbol_to_baostock_code(symbol: str) -> str:
 
 
 def _get_ohlcv_source() -> str:
-    """INGEST_OHLCV_SOURCE：akshare（默认）或 baostock。东方财富频繁断连时可设为 baostock。"""
-    raw = (os.environ.get("INGEST_OHLCV_SOURCE") or "akshare").strip().lower()
-    return "baostock" if raw == "baostock" else "akshare"
+    """INGEST_OHLCV_SOURCE：akshare（默认）、baostock 或 jqdata。也可用 INGEST_SOURCE=jqdata 统一走 JQData。"""
+    raw = (os.environ.get("INGEST_OHLCV_SOURCE") or os.environ.get("INGEST_SOURCE") or "akshare").strip().lower()
+    if raw == "jqdata":
+        return "jqdata"
+    if raw == "baostock":
+        return "baostock"
+    return "akshare"
+
+
+def _jqdata_days_back_start() -> int:
+    """JQData 未配置日期时：起始回溯天数。默认 450（约 15 个月前）。"""
+    raw = (os.environ.get("INGEST_JQDATA_DAYS_BACK_START") or "450").strip()
+    try:
+        return max(1, min(365 * 20, int(raw)))
+    except ValueError:
+        return 450
+
+
+def _jqdata_days_back_end() -> int:
+    """JQData 未配置日期时：结束回溯天数。默认 90（约 3 个月前）。"""
+    raw = (os.environ.get("INGEST_JQDATA_DAYS_BACK_END") or "90").strip()
+    try:
+        return max(0, min(365 * 5, int(raw)))
+    except ValueError:
+        return 90
+
+
+def _jqdata_date_range():
+    """
+    JQData 拉取日期范围。优先读 INGEST_JQDATA_DATE_START / INGEST_JQDATA_DATE_END（格式 YYYY-MM-DD 或 YYYYMMDD），
+    返回 (start_str, end_str) 即 YYYYMMDD。若未配置则按 DAYS_BACK 回退计算。
+    """
+    start_raw = (os.environ.get("INGEST_JQDATA_DATE_START") or "").strip().replace("-", "")
+    end_raw = (os.environ.get("INGEST_JQDATA_DATE_END") or "").strip().replace("-", "")
+    if len(start_raw) >= 8 and len(end_raw) >= 8:
+        s, e = start_raw[:8], end_raw[:8]
+        if s > e:
+            s, e = e, s
+        return s, e
+    end_dt = datetime.utcnow()
+    start_days = _jqdata_days_back_start()
+    end_days = _jqdata_days_back_end()
+    start = end_dt - timedelta(days=start_days)
+    end = end_dt - timedelta(days=end_days)
+    if start > end:
+        start, end = end, start
+    return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
 def _fetch_baostock_ohlcv(
@@ -163,25 +207,47 @@ def _fetch_baostock_ohlcv(
     return rows
 
 
+def _fetch_jqdata_ohlcv(
+    symbol: str,
+    period: str,
+    start_date: str,
+    end_date: str,
+) -> list:
+    """
+    使用 JQData（聚宽）拉取 A 股日线。需 INGEST_SOURCE=jqdata 或 INGEST_OHLCV_SOURCE=jqdata 及 JQDATA_USER/JQDATA_PASSWORD。
+    日期格式 YYYYMMDD。
+    """
+    try:
+        from diting.ingestion.jqdata_client import get_price
+
+        symbol_ts = _symbol_to_ts(symbol)
+        return get_price(symbol, start_date, end_date, symbol_ts, period=period)
+    except ImportError:
+        logger.warning("jqdata_client 不可用，无法使用 JQData 行情源")
+        return []
+
+
 def _fetch_akshare_ohlcv(
     symbol: str,
     period: str,
     start_date: str,
     end_date: str,
     adjust: str = "",
-    max_retries: int = 5,
-    retry_delay: float = 5.0,
+    max_retries: int = 12,
+    retry_delay: float = 20.0,
 ) -> list:
     """
-    AkShare 拉取 A 股日线。东方财富接口易出现 RemoteDisconnected，加重试+退避+浏览器头。
+    AkShare 拉取 A 股日线。东方财富接口易出现 RemoteDisconnected/Connection reset，加重试+长退避+浏览器头。
+    云服务器 IP 易被限流，可配合 .env 减小 BATCH_SIZE、加大 BATCH_PAUSE_SEC/DELAY_BETWEEN_SYMBOLS。
     [Ref: design-stage2-02-integration-akshare]
     """
+    import random
     import time
 
     import requests
     import akshare as ak
 
-    # 东方财富数据接口常对非浏览器 UA 或缺失 Referer 断连，临时为 requests 注入浏览器头
+    # 东方财富：浏览器头 + 超时，降低被断连/误判为脚本的概率
     _orig_get = requests.get
     def _get_with_headers(url, *args, **kwargs):
         if "eastmoney.com" in (url or ""):
@@ -191,13 +257,17 @@ def _fetch_akshare_ohlcv(
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ))
             h.setdefault("Referer", "https://quote.eastmoney.com/")
+            h.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            h.setdefault("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            kwargs.setdefault("timeout", 60)
         return _orig_get(url, *args, **kwargs)
     requests.get = _get_with_headers
     try:
         for attempt in range(max_retries):
             try:
                 if attempt == 0:
-                    time.sleep(1)  # 首请求前短延迟，降低被接口误判为脚本的概率
+                    # 首请求前延迟 + 随机抖动，降低云服务器上被限流概率
+                    time.sleep(2 + random.uniform(0, 3))
                 df = ak.stock_zh_a_hist(
                     symbol=symbol,
                     period=period,
@@ -255,7 +325,14 @@ def _fetch_akshare_ohlcv(
             except Exception as e:
                 logger.warning("akshare stock_zh_a_hist attempt %s failed: %s", attempt + 1, e)
                 if attempt < max_retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
+                    # 断连类错误长退避 + 随机抖动，云服务器 IP 易被限流
+                    extra = 0
+                    err_str = str(e).lower()
+                    if "remotedisconnected" in err_str or "connection reset" in err_str or "connection aborted" in err_str:
+                        extra = 30
+                    base_sleep = retry_delay * (attempt + 1) + extra
+                    jitter = random.uniform(0, 10)
+                    time.sleep(base_sleep + jitter)
                 else:
                     raise
         return []
@@ -264,8 +341,11 @@ def _fetch_akshare_ohlcv(
 
 
 def _fetch_ohlcv(symbol: str, period: str, start_str: str, end_str: str, adjust: str = "") -> list:
-    """按 INGEST_OHLCV_SOURCE 选择 akshare 或 baostock 拉取日线；东方财富持续断连时请设 baostock。"""
-    if _get_ohlcv_source() == "baostock":
+    """按 INGEST_OHLCV_SOURCE / INGEST_SOURCE 选择 akshare、baostock 或 jqdata 拉取日线。"""
+    src = _get_ohlcv_source()
+    if src == "jqdata":
+        return _fetch_jqdata_ohlcv(symbol, period, start_str, end_str)
+    if src == "baostock":
         return _fetch_baostock_ohlcv(symbol, start_str, end_str)
     return _fetch_akshare_ohlcv(symbol, period, start_str, end_str, adjust=adjust)
 
@@ -303,12 +383,18 @@ def run_ingest_ohlcv(
         logger.info("ingest_ohlcv: mock mode, %s rows", len(all_rows))
     else:
         symbols = symbols or REAL_TEST_SYMBOLS_15
-        end = datetime.utcnow()
-        start = end - timedelta(days=days_back)
-        start_str = start.strftime("%Y%m%d")
-        end_str = end.strftime("%Y%m%d")
-        all_rows = []
         source = _get_ohlcv_source()
+        end_dt = datetime.utcnow()
+        # JQData：优先用 INGEST_JQDATA_DATE_START/END 指定日期范围，否则按 DAYS_BACK 计算
+        if source == "jqdata":
+            start_str, end_str = _jqdata_date_range()
+            logger.info("OHLCV 拉取：JQData 日期范围 %s ～ %s", start_str, end_str)
+        else:
+            start = end_dt - timedelta(days=days_back)
+            end = end_dt
+            start_str = start.strftime("%Y%m%d")
+            end_str = end.strftime("%Y%m%d")
+        all_rows = []
         workers = _concurrent_workers()
         if workers > 1:
             # 可控并发 + 全局限速：全 A 股约 5000 标、1.5 req/s 约 55 分钟

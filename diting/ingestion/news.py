@@ -5,7 +5,8 @@
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import psycopg2
 
@@ -45,6 +46,31 @@ def _fetch_akshare_news(max_retries: int = 3, retry_delay: float = 2.0) -> list:
     return []
 
 
+def _fetch_akshare_stock_news_em(
+    symbol: str,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> list:
+    """按标的拉取东方财富个股新闻；用于生产级每标的数据。"""
+    for attempt in range(max_retries):
+        try:
+            import akshare as ak
+
+            if not hasattr(ak, "stock_news_em"):
+                return []
+            df = ak.stock_news_em(symbol=symbol)
+            if df is None or df.empty:
+                return []
+            return df.to_dict("records")
+        except Exception as e:
+            logger.warning("akshare stock_news_em symbol=%s attempt %s failed: %s", symbol, attempt + 1, e)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+            else:
+                raise
+    return []
+
+
 def _fetch_openbb_macro_or_news(max_retries: int = 2, retry_delay: float = 2.0) -> dict:
     """
     OpenBB 国际/宏观：至少一条到 L2 的写入路径。
@@ -71,9 +97,50 @@ def _fetch_openbb_macro_or_news(max_retries: int = 2, retry_delay: float = 2.0) 
     return {"source": "openbb", "error": "all_retries_failed"}
 
 
-def run_ingest_news() -> int:
+def _parse_news_date(record: dict) -> Optional[datetime]:
+    """从单条新闻 dict 中解析日期，支持常见字段名。"""
+    for key in ("date", "日期", "发布时间", "time"):
+        v = record.get(key)
+        if v is None:
+            continue
+        if isinstance(v, datetime):
+            return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v
+        try:
+            if isinstance(v, str):
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+                    try:
+                        return datetime.strptime(v[:19].replace("/", "-"), fmt).replace(tzinfo=timezone.utc)
+                    except (ValueError, TypeError):
+                        continue
+        except Exception:
+            pass
+    return None
+
+
+def _filter_news_by_days(records: list, days_back: int) -> list:
+    """只保留最近 days_back 天内的新闻；无日期字段的条目保留。"""
+    if not records or days_back <= 0:
+        return records
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    out = []
+    for r in records:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        dt = _parse_news_date(r)
+        if dt is None:
+            out.append(r)
+        elif dt >= cutoff:
+            out.append(r)
+    return out
+
+
+def run_ingest_news(symbol: str = None, days_back: int = None) -> int:
     """
     执行 ingest_news：国内 AkShare + 国际 OpenBB，写入 L2 data_versions。
+    symbol 为 None：拉取全市场最新资讯 + OpenBB 宏观（各写一条版本）。
+    symbol 不为 None：拉取该标的个股新闻（stock_news_em）并写入 L2，用于生产级每标的数据。
+    days_back：仅保留最近 N 天内的新闻（按条目的日期字段过滤）；None 或 0 表示不过滤。
     工作目录: diting-core。DITING_INGEST_MOCK=1 时写入两条 mock 版本（akshare + openbb）。
     """
     written = 0
@@ -83,6 +150,18 @@ def run_ingest_news() -> int:
 
     try:
         if _is_mock():
+            if symbol:
+                version_id = f"news_{symbol}_{now.strftime('%Y%m%d%H%M%S')}"
+                write_data_version(
+                    conn,
+                    data_type=DATA_TYPE_NEWS,
+                    version_id=version_id,
+                    timestamp=now,
+                    file_path=f"l2/news/{symbol}.json",
+                    file_size=0,
+                    checksum="",
+                )
+                return 1
             version_id_ak = f"news_akshare_{now.strftime('%Y%m%d%H%M%S')}"
             write_data_version(
                 conn,
@@ -108,9 +187,34 @@ def run_ingest_news() -> int:
             logger.info("ingest_news: mock mode, %s versions", written)
             return written
 
-        # 国内：AkShare 最新资讯
+        # 按标的：个股新闻
+        if symbol:
+            try:
+                records = _fetch_akshare_stock_news_em(symbol)
+                if days_back and days_back > 0:
+                    records = _filter_news_by_days(records, days_back)
+                version_id = f"news_{symbol}_{now.strftime('%Y%m%d%H%M%S')}"
+                file_path = f"l2/news/{symbol}.json"
+                file_size = len(str(records)) if records else 0
+                write_data_version(
+                    conn,
+                    data_type=DATA_TYPE_NEWS,
+                    version_id=version_id,
+                    timestamp=now,
+                    file_path=file_path,
+                    file_size=file_size,
+                    checksum="",
+                )
+                return 1
+            except Exception as e:
+                logger.warning("ingest_news symbol=%s failed: %s", symbol, e)
+                return 0
+
+        # 全市场：国内 AkShare 最新资讯
         try:
             records = _fetch_akshare_news()
+            if days_back and days_back > 0 and records:
+                records = _filter_news_by_days(records, days_back)
             if records:
                 version_id = f"news_akshare_{now.strftime('%Y%m%d%H%M%S')}"
                 file_path = "l2/news/akshare_latest.json"

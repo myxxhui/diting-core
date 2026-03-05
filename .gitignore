@@ -1,4 +1,5 @@
 # .cursorrules: 允许提交，供本仓 AI 规则共享（见 diting-doc 00_系统规则 §十一）
 # 勿提交 .env（见 .env.template）
-.env
 .env.ingest.local
+# make ingest-production 断点续跑进度（06_ 最佳分批模式）
+.ingest_production_progress

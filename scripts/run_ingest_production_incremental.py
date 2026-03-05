@@ -12,6 +12,19 @@ root = Path(__file__).resolve().parents[1]
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
+# 加载 .env，未设置的变量才用脚本内默认参数（与 run_ingest_production 一致）
+_env_file = root / ".env"
+if _env_file.exists():
+    with open(_env_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            if k and os.environ.get(k) is None:
+                os.environ[k] = v
+
 from diting.ingestion import (
     run_ingest_universe,
     run_ingest_ohlcv,
