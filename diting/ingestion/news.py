@@ -135,12 +135,53 @@ def _filter_news_by_days(records: list, days_back: int) -> list:
     return out
 
 
-def run_ingest_news(symbol: str = None, days_back: int = None) -> int:
+def _parse_date_bound(s: str):
+    """解析 YYYY-MM-DD 或 YYYYMMDD 为 date，用于日期范围过滤。"""
+    if not s or not isinstance(s, str):
+        return None
+    s = s.strip().replace("-", "")[:8]
+    if len(s) != 8:
+        return None
+    try:
+        from datetime import date
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    except (ValueError, TypeError):
+        return None
+
+
+def _filter_news_by_date_range(records: list, start_date, end_date) -> list:
+    """只保留日期在 [start_date, end_date] 内的新闻；start/end 为 date 或 datetime；无日期字段的条目保留。"""
+    if not records or start_date is None or end_date is None:
+        return records
+    start_d = start_date.date() if hasattr(start_date, "date") else start_date
+    end_d = end_date.date() if hasattr(end_date, "date") else end_date
+    out = []
+    for r in records:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        dt = _parse_news_date(r)
+        if dt is None:
+            out.append(r)
+        else:
+            d = dt.date() if hasattr(dt, "date") else dt
+            if start_d <= d <= end_d:
+                out.append(r)
+    return out
+
+
+def run_ingest_news(
+    symbol: str = None,
+    days_back: int = None,
+    date_start: str = None,
+    date_end: str = None,
+) -> int:
     """
     执行 ingest_news：国内 AkShare + 国际 OpenBB，写入 L2 data_versions。
     symbol 为 None：拉取全市场最新资讯 + OpenBB 宏观（各写一条版本）。
     symbol 不为 None：拉取该标的个股新闻（stock_news_em）并写入 L2，用于生产级每标的数据。
     days_back：仅保留最近 N 天内的新闻（按条目的日期字段过滤）；None 或 0 表示不过滤。
+    date_start/date_end：与 days_back 二选一；指定时只保留日期在 [date_start, date_end] 内的新闻（格式 YYYY-MM-DD 或 YYYYMMDD）。
     工作目录: diting-core。DITING_INGEST_MOCK=1 时写入两条 mock 版本（akshare + openbb）。
     """
     written = 0
@@ -191,7 +232,12 @@ def run_ingest_news(symbol: str = None, days_back: int = None) -> int:
         if symbol:
             try:
                 records = _fetch_akshare_stock_news_em(symbol)
-                if days_back and days_back > 0:
+                if date_start and date_end:
+                    start_d = _parse_date_bound(date_start)
+                    end_d = _parse_date_bound(date_end)
+                    if start_d is not None and end_d is not None:
+                        records = _filter_news_by_date_range(records, start_d, end_d)
+                elif days_back and days_back > 0:
                     records = _filter_news_by_days(records, days_back)
                 version_id = f"news_{symbol}_{now.strftime('%Y%m%d%H%M%S')}"
                 file_path = f"l2/news/{symbol}.json"
@@ -213,7 +259,12 @@ def run_ingest_news(symbol: str = None, days_back: int = None) -> int:
         # 全市场：国内 AkShare 最新资讯
         try:
             records = _fetch_akshare_news()
-            if days_back and days_back > 0 and records:
+            if date_start and date_end and records:
+                start_d = _parse_date_bound(date_start)
+                end_d = _parse_date_bound(date_end)
+                if start_d is not None and end_d is not None:
+                    records = _filter_news_by_date_range(records, start_d, end_d)
+            elif days_back and days_back > 0 and records:
                 records = _filter_news_by_days(records, days_back)
             if records:
                 version_id = f"news_akshare_{now.strftime('%Y%m%d%H%M%S')}"

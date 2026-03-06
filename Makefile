@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images deps-classifier diting prod
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier diting prod
 
 # 采集相关 target 使用的 Python：akshare 要求 >= 3.8，优先 python3.8（若已安装）
 PYTHON_INGEST := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
@@ -111,27 +111,41 @@ ingest-production-incremental-fast:
 	cd "$$root" && export INGEST_OHLCV_CONCURRENT=5 INGEST_OHLCV_RATE_PER_SEC=2.0 && \
 	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production_incremental.py
 
-# Stage2-02 一键构建本阶段所涉全部镜像 [Ref: 04_阶段规划与实践/Stage2_数据采集与存储/02_采集逻辑与Dockerfile_实践.md V-BUILD-ALL]
-# 当前仅采集镜像；推送到 ACR 供 K3s（多为 linux/amd64）拉取时须指定平台，避免在 Mac ARM 上构建出 arm64 镜像导致节点 exec format error
+# Stage2-02 一键构建本阶段所涉全部镜像（仅构建；推送用 make push-images）[Ref: 02_采集逻辑与Dockerfile_实践, 01_语义分类器_实践]
 DOCKER_PLATFORM ?= linux/amd64
-build-images:
-	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
-	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f Dockerfile.ingest -t diting-ingest:test .
-	@echo "build-images: diting-ingest:test OK ($(DOCKER_PLATFORM))"
-
-# Stage2-06 本地构建并推送到项目 ACR；Chart 默认使用 latest [Ref: 06_生产级数据要求_实践.md]
-# 需先配置环境变量 DITING_ACR_PASSWORD，或已 docker login 对应 registry。
-# ACR 地址：crpi-7vifw4ok9jkcxr60.cn-hongkong.personal.cr.aliyuncs.com/titan-core/ ；用户名：sean_hui
 ACR_REGISTRY ?= crpi-7vifw4ok9jkcxr60.cn-hongkong.personal.cr.aliyuncs.com
 ACR_REPO ?= titan-core/diting-ingest
+ACR_REPO_MODULE_A ?= titan-core/diting-module-a
 ACR_USERNAME ?= sean_hui
+# ACR 登录密码：在下一行直接赋值（或运行时 export）。勿将含真实密码的 Makefile 提交到仓库。
+DITING_ACR_PASSWORD ?= Hui123123
+# 若在此仓写死密码，可改为例如：DITING_ACR_PASSWORD ?= 你的ACR密码Hui123123
 ACR_IMAGE := $(ACR_REGISTRY)/$(ACR_REPO):latest
+ACR_IMAGE_MODULE_A := $(ACR_REGISTRY)/$(ACR_REPO_MODULE_A):latest
+
+build-images: build-module-a
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f Dockerfile.ingest -t diting-ingest:test .
+	@echo "build-images: diting-ingest:test + diting-module-a:test OK ($(DOCKER_PLATFORM))"
+
+# Stage3-01 Module A 语义分类器镜像 [Ref: 01_语义分类器_实践, global_const.deployable_units.module_a]
+build-module-a:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f docker/module_a/Dockerfile -t diting-module-a:test .
+	@echo "build-module-a: diting-module-a:test OK ($(DOCKER_PLATFORM))"
+
+# 构建并推送到 ACR（密码取 Makefile 中 DITING_ACR_PASSWORD 或环境变量）
 push-images: build-images
-	@docker tag diting-ingest:test $(ACR_IMAGE); \
-	if [ -n "$$DITING_ACR_PASSWORD" ]; then \
-	  echo "$$DITING_ACR_PASSWORD" | docker login $(ACR_REGISTRY) -u $(ACR_USERNAME) --password-stdin; \
-	fi; \
-	docker push $(ACR_IMAGE) && echo "push-images: $(ACR_IMAGE) OK"
+	@if [ -z "$(DITING_ACR_PASSWORD)" ]; then echo "错误: 请在 Makefile 中为 DITING_ACR_PASSWORD 赋值或 export DITING_ACR_PASSWORD"; exit 1; fi; \
+	echo "$(DITING_ACR_PASSWORD)" | docker login $(ACR_REGISTRY) -u $(ACR_USERNAME) --password-stdin || { echo "登录失败，请检查 DITING_ACR_PASSWORD 与账号是否有 $(ACR_REGISTRY) 的推送权限"; exit 1; }; \
+	docker tag diting-ingest:test $(ACR_IMAGE) && docker push $(ACR_IMAGE) && echo "push $(ACR_IMAGE) OK" || { echo "推送 ingest 失败；若报 requested access denied，请确认账号对 titan-core 命名空间有推送权限"; exit 1; }; \
+	docker tag diting-module-a:test $(ACR_IMAGE_MODULE_A) && docker push $(ACR_IMAGE_MODULE_A) && echo "push $(ACR_IMAGE_MODULE_A) OK" || { echo "推送 module-a 失败；若报 requested access denied，请确认账号对 titan-core 命名空间有推送权限"; exit 1; }
+
+# 仅推送 Module A 镜像（假定已 make build-module-a）
+push-module-a:
+	@if [ -z "$(DITING_ACR_PASSWORD)" ]; then echo "错误: 请在 Makefile 中为 DITING_ACR_PASSWORD 赋值或 export"; exit 1; fi; \
+	echo "$(DITING_ACR_PASSWORD)" | docker login $(ACR_REGISTRY) -u $(ACR_USERNAME) --password-stdin || exit 1; \
+	docker tag diting-module-a:test $(ACR_IMAGE_MODULE_A) && docker push $(ACR_IMAGE_MODULE_A) && echo "push-module-a: $(ACR_IMAGE_MODULE_A) OK"
 
 # ---------- Stage2 本地实践：L1/L2 编排与建表归属 diting-infra（02_三位一体仓库规约）----------
 # 请在 diting-infra 执行 make local-deps-up、make local-deps-init 后，在本仓配置 .env 指向 localhost:15432/15433，再执行 verify-db-connection、ingest-test。回收时在 diting-infra 执行 make local-deps-down。

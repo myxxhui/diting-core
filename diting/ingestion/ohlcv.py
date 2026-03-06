@@ -417,11 +417,14 @@ def run_ingest_ohlcv(
                         logger.exception("ingest_ohlcv symbol=%s failed: %s", sym, e)
                         raise
         else:
-            logger.info("OHLCV 拉取：数据源=%s 串行（CONCURRENT=1）", source)
+            logger.info("OHLCV 拉取：数据源=%s 串行（CONCURRENT=1），共 %s 只", source, len(symbols))
             for i, sym in enumerate(symbols):
                 try:
                     rows = _fetch_ohlcv(sym, period, start_str, end_str)
                     all_rows.extend(rows)
+                    # 每 10 只或首/末只打一条进度，避免长时间无输出
+                    if (i + 1) % 10 == 0 or i == 0 or i == len(symbols) - 1:
+                        logger.info("OHLCV 进度 %s/%s 只（本批）", i + 1, len(symbols))
                     delay = _delay_between_symbols_sec()
                     if delay > 0 and i < len(symbols) - 1:
                         time.sleep(delay)
@@ -435,6 +438,7 @@ def run_ingest_ohlcv(
     dsn = get_timescale_dsn()
     conn = psycopg2.connect(dsn)
     try:
+        logger.info("OHLCV 本批拉取完成，正在写入数据库（共 %s 行，可能需数十秒）…", len(all_rows))
         n = write_ohlcv_batch(conn, all_rows)
         return n
     finally:

@@ -56,16 +56,22 @@ def main() -> int:
                 print("L1：未找到 ohlcv 表", file=sys.stderr)
                 return 1
 
-            # 单标 bar 数（按 symbol 聚合）
+            # 单标 bar 数与时间范围（按 symbol 聚合）
             cur.execute("""
-                SELECT symbol, COUNT(*) AS cnt
+                SELECT symbol, COUNT(*) AS cnt,
+                       MIN(datetime)::date AS min_dt, MAX(datetime)::date AS max_dt
                 FROM ohlcv
                 GROUP BY symbol
+                ORDER BY cnt ASC
             """)
             rows = cur.fetchall()
             if not rows:
                 print("L1：ohlcv 表无数据", file=sys.stderr)
                 return 1
+
+            print("L1 各标的 K 线数量与时间范围：")
+            for sym, cnt, min_dt, max_dt in rows:
+                print(f"  {sym}: K线数={cnt}, 时间范围={min_dt} ~ {max_dt}")
 
             min_bars = min(r[1] for r in rows)
             num_symbols = len(rows)
@@ -89,6 +95,7 @@ def main() -> int:
                 ohlcv_symbols = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM a_share_universe")
                 universe_count = cur.fetchone()[0]
+                print(f"全 A 股标的表：universe 行数={universe_count}，ohlcv 标的数={ohlcv_symbols}")
                 if test_scope:
                     if universe_count == 0:
                         print("L1（测试集）：a_share_universe 表无数据，跳过标的口径校验")
@@ -96,6 +103,21 @@ def main() -> int:
                         print(f"L1（测试集）：ohlcv {ohlcv_symbols} 只标的，universe {universe_count} 行，通过")
                 else:
                     if universe_count > 0 and ohlcv_symbols < universe_count:
+                        # 列出 universe 中有但 ohlcv 中无的标的（最多 50 个示例）
+                        cur.execute("""
+                            SELECT u.symbol FROM a_share_universe u
+                            WHERE NOT EXISTS (SELECT 1 FROM ohlcv o WHERE o.symbol = u.symbol)
+                            ORDER BY u.symbol
+                            LIMIT 50
+                        """)
+                        missing = [r[0] for r in cur.fetchall()]
+                        print("universe 中有但 ohlcv 中缺失的标的（示例最多 50）：", file=sys.stderr)
+                        for sym in missing:
+                            print(f"  {sym}", file=sys.stderr)
+                        if ohlcv_symbols > 0:
+                            cur.execute("SELECT symbol FROM ohlcv GROUP BY symbol ORDER BY symbol LIMIT 5")
+                            sample_ohlcv = [r[0] for r in cur.fetchall()]
+                            print(f"ohlcv 标的示例: {sample_ohlcv}", file=sys.stderr)
                         print(
                             f"全 A 股标的表行数 {universe_count} 大于 ohlcv 标的数 {ohlcv_symbols}，未全覆盖",
                             file=sys.stderr,

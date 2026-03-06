@@ -14,6 +14,59 @@ from diting.ingestion.l2_writer import write_data_version
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_industry_revenue_row(data: dict) -> tuple:
+    """从采集得到的 dict 中解析 (industry_name, revenue_ratio, rnd_ratio, commodity_ratio)。"""
+    industry_name = ""
+    revenue_ratio = 0.0
+    rnd_ratio = 0.0
+    commodity_ratio = 0.0
+    for k, v in (data or {}).items():
+        k = (k or "").strip()
+        if not isinstance(v, (int, float, str)):
+            continue
+        if k in ("行业", "所属行业", "申万行业"):
+            industry_name = str(v).strip() if v else ""
+        elif k in ("主营业务收入占比", "主营营收占比", "revenue_ratio"):
+            try:
+                revenue_ratio = float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                pass
+        elif k in ("研发投入占比", "研发支出占比", "rnd_ratio"):
+            try:
+                rnd_ratio = float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                pass
+        elif k in ("大宗商品营收占比", "commodity_ratio"):
+            try:
+                commodity_ratio = float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                pass
+    return (industry_name, revenue_ratio, rnd_ratio, commodity_ratio)
+
+
+def _upsert_industry_revenue_summary(conn, symbol: str, industry_name: str, revenue_ratio: float, rnd_ratio: float, commodity_ratio: float) -> None:
+    """写入或更新 L2 industry_revenue_summary，供 Module A 按标的查询。"""
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return
+    sql = """
+    INSERT INTO industry_revenue_summary (symbol, industry_name, revenue_ratio, rnd_ratio, commodity_ratio, updated_at)
+    VALUES (%s, %s, %s, %s, %s, NOW())
+    ON CONFLICT (symbol) DO UPDATE SET
+        industry_name = EXCLUDED.industry_name,
+        revenue_ratio = EXCLUDED.revenue_ratio,
+        rnd_ratio = EXCLUDED.rnd_ratio,
+        commodity_ratio = EXCLUDED.commodity_ratio,
+        updated_at = NOW()
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute(sql, (symbol, industry_name or "", revenue_ratio, rnd_ratio, commodity_ratio))
+        conn.commit()
+    finally:
+        cur.close()
+
 # ingest-test 目标：至少 1 只标的的财务摘要写入 L2 data_versions
 DEFAULT_SYMBOL = "000001"
 DATA_TYPE = "industry_revenue"
@@ -62,10 +115,12 @@ def _fetch_akshare_financial_abstract(
 
 def run_ingest_industry_revenue(symbol: str = None) -> int:
     """
-    执行 ingest_industry_revenue：从 AkShare 拉取财务摘要并写入 L2 data_versions。
-    工作目录: diting-core。DITING_INGEST_MOCK=1 时写入一条 mock 版本。
+    执行 ingest_industry_revenue：从 AkShare 拉取财务摘要并写入 L2 data_versions 与 industry_revenue_summary。
+    工作目录: diting-core。symbol 建议为带交易所后缀（如 000001.SZ），与 get_current_a_share_universe 一致；
+    调用外部 API 时使用无后缀代码，写入 industry_revenue_summary 时保留传入的 symbol 供 Module A 查询。
     """
-    symbol = symbol or DEFAULT_SYMBOL
+    symbol = (symbol or DEFAULT_SYMBOL).strip()
+    api_symbol = symbol.split(".")[0] if "." in symbol else symbol  # AkShare/JQ 使用无后缀
     now = datetime.now(timezone.utc)
     version_id = f"industry_revenue_{symbol}_{now.strftime('%Y%m%d%H%M%S')}"
     file_path = f"l2/industry_revenue/{symbol}.json"
@@ -91,7 +146,7 @@ def run_ingest_industry_revenue(symbol: str = None) -> int:
     else:
         source = _get_ingest_source()
         if source == "jqdata":
-            data = _fetch_jqdata_financial(symbol)
+            data = _fetch_jqdata_financial(api_symbol)
             if not data:
                 logger.warning("ingest_industry_revenue: no jqdata for symbol=%s", symbol)
                 return 0
@@ -115,10 +170,15 @@ def run_ingest_industry_revenue(symbol: str = None) -> int:
                     file_size=file_size,
                     checksum="",
                 )
+                try:
+                    iname, rev, rnd, comm = _parse_industry_revenue_row(data)
+                    _upsert_industry_revenue_summary(conn, symbol, iname, rev, rnd, comm)
+                except Exception as e:
+                    logger.debug("upsert industry_revenue_summary: %s", e)
                 return 1
             finally:
                 conn.close()
-        df = _fetch_akshare_financial_abstract(symbol)
+        df = _fetch_akshare_financial_abstract(api_symbol)
         if df is None or df.empty:
             logger.warning("ingest_industry_revenue: no data for symbol=%s", symbol)
             return 0
@@ -143,6 +203,11 @@ def run_ingest_industry_revenue(symbol: str = None) -> int:
                 file_size=file_size,
                 checksum="",
             )
+            try:
+                iname, rev, rnd, comm = _parse_industry_revenue_row(first)
+                _upsert_industry_revenue_summary(conn, symbol, iname, rev, rnd, comm)
+            except Exception as e:
+                logger.debug("upsert industry_revenue_summary: %s", e)
             return 1
         finally:
             conn.close()

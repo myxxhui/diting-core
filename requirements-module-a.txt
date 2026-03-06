@@ -1,0 +1,5 @@
+# Module A 语义分类器运行时依赖 [Ref: 01_语义分类器_实践]
+# 与 L1/L2 连接、Proto、YAML 规则一致；不包含 akshare/采集链
+PyYAML>=6.0
+psycopg2-binary>=2.9.0
+protobuf>=3.20.0

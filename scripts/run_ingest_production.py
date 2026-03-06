@@ -49,40 +49,74 @@ PROGRESS_FILE = root / ".ingest_production_progress"
 
 
 def _ingest_enabled(scope: str) -> bool:
-    """生产采集开关：0 或不写 = 关闭；其它数字 = 开启（且该数字即数据长度，见 _ingest_days）。"""
+    """生产采集开关：true/1/yes = 开启，false/0/空 = 关闭（不表示时间范围）。"""
     key = f"INGEST_PRODUCTION_{scope}"
-    raw = (os.environ.get(key) or "").strip()
-    return raw != "" and raw != "0"
+    raw = (os.environ.get(key) or "").strip().lower()
+    return raw in ("true", "1", "yes")
 
 
-def _ingest_days(scope: str, default: int = None, max_days: int = 365 * 20) -> int:
+def _unified_date_range():
     """
-    读取该类型的「数据长度」（天数）。仅当 _ingest_enabled(scope) 为 True 时有意义。
-    0 或不写 = 关闭；正数 = 开启且表示回溯/拉取天数；非数字或未写时用 default。
+    统一拉取时间范围：当 INGEST_JQDATA_DATE_START 与 INGEST_JQDATA_DATE_END 均已配置时，
+    返回 (start_str, end_str) 格式 YYYY-MM-DD；否则返回 (None, None)。
     """
-    key = f"INGEST_PRODUCTION_{scope}"
-    raw = (os.environ.get(key) or "").strip()
+    start_raw = (os.environ.get("INGEST_JQDATA_DATE_START") or "").strip().replace(" ", "")
+    end_raw = (os.environ.get("INGEST_JQDATA_DATE_END") or "").strip().replace(" ", "")
+    if not start_raw or not end_raw:
+        return None, None
+    s = start_raw.replace("-", "")[:8]
+    e = end_raw.replace("-", "")[:8]
+    if len(s) != 8 or len(e) != 8:
+        return None, None
     try:
-        n = int(raw)
-        if n <= 0:
-            return default or DAYS_BACK_DEFAULT
-        return max(1, min(max_days, n))
+        int(s)
+        int(e)
     except ValueError:
-        return default or DAYS_BACK_DEFAULT
+        return None, None
+    start_str = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    end_str = f"{e[:4]}-{e[4:6]}-{e[6:8]}"
+    if start_str > end_str:
+        start_str, end_str = end_str, start_str
+    return start_str, end_str
 
 
 def _ohlcv_days_back() -> int:
-    """K 线拉取时间线：INGEST_PRODUCTION_OHLCV 为正值时即回溯天数，否则默认 5 年。"""
+    """K 线拉取时间线：优先用 INGEST_JQDATA_DATE_* 统一范围的天数，否则 INGEST_PRODUCTION_OHLCV_DAYS_BACK，默认 5 年。"""
     if not _ingest_enabled("OHLCV"):
         return DAYS_BACK_DEFAULT
-    return _ingest_days("OHLCV", default=DAYS_BACK_DEFAULT, max_days=365 * 20)
+    start_str, end_str = _unified_date_range()
+    if start_str and end_str:
+        try:
+            from datetime import datetime
+            start_d = datetime.strptime(start_str, "%Y-%m-%d")
+            end_d = datetime.strptime(end_str, "%Y-%m-%d")
+            return max(1, (end_d - start_d).days)
+        except (ValueError, TypeError):
+            pass
+    raw = (os.environ.get("INGEST_PRODUCTION_OHLCV_DAYS_BACK") or "").strip()
+    try:
+        n = int(raw)
+        if n <= 0:
+            return DAYS_BACK_DEFAULT
+        return max(1, min(365 * 20, n))
+    except ValueError:
+        return DAYS_BACK_DEFAULT
 
 
 def _news_days_back() -> int:
-    """新闻拉取时间线：INGEST_PRODUCTION_NEWS 为正值时即只保留最近 N 天。"""
+    """新闻拉取时间线：未使用统一日期范围时，由 INGEST_PRODUCTION_NEWS_DAYS_BACK 指定保留最近 N 天，默认 365。"""
     if not _ingest_enabled("NEWS"):
         return 0
-    return _ingest_days("NEWS", default=365, max_days=365 * 5)  # 未写数字时默认 365 天
+    if _unified_date_range()[0]:
+        return 0  # 使用统一范围时由 date_start/date_end 过滤，此处不生效
+    raw = (os.environ.get("INGEST_PRODUCTION_NEWS_DAYS_BACK") or "").strip()
+    try:
+        n = int(raw)
+        if n <= 0:
+            return 365
+        return max(1, min(365 * 5, n))
+    except ValueError:
+        return 365
 
 
 def _batch_size() -> int:
@@ -170,7 +204,7 @@ def main() -> int:
             logger.info("全量采集 step1: 刷新 universe（全A股）")
             run_ingest_universe()
         else:
-            logger.info("全量采集 step1: 跳过 universe（INGEST_PRODUCTION_UNIVERSE=0）")
+            logger.info("全量采集 step1: 跳过 universe（INGEST_PRODUCTION_UNIVERSE 未开启）")
 
         # 若需 K 线/行业/新闻，从表内读取标的列表
         symbols_ts = []
@@ -178,15 +212,19 @@ def main() -> int:
         if need_symbols:
             symbols_ts = get_current_a_share_universe(force_refresh=False)
             if not symbols_ts:
-                logger.error("universe 表无标的，请先开启 INGEST_PRODUCTION_UNIVERSE=1 或先执行一次全量标的拉取")
+                logger.error("universe 表无标的，请先开启 INGEST_PRODUCTION_UNIVERSE=true 或先执行一次全量标的拉取")
                 return 1
             symbols_raw = [s.split(".")[0] for s in symbols_ts]
             total = len(symbols_raw)
 
-        # ② K 线/量化：按开关与时间线拉取
+        # ② K 线/量化：按开关与时间线拉取（优先 INGEST_JQDATA_DATE_* 统一范围）
         if _ingest_enabled("OHLCV"):
             days_back = _ohlcv_days_back()
-            logger.info("全量采集 step2: K 线（OHLCV）| 回溯 %s 天，符合 AB 模块生产要求", days_back)
+            us, ue = _unified_date_range()
+            if us and ue:
+                logger.info("全量采集 step2: K 线（OHLCV）| 日期范围 %s ～ %s（共 %s 天），符合 AB 模块生产要求", us, ue, days_back)
+            else:
+                logger.info("全量采集 step2: K 线（OHLCV）| 回溯 %s 天，符合 AB 模块生产要求", days_back)
             completed = _read_progress()
             if completed > 0 and completed < total:
                 symbols_raw_ohlcv = symbols_raw[completed:]
@@ -218,10 +256,10 @@ def main() -> int:
                     time.sleep(batch_pause)
             _clear_progress()
         else:
-            logger.info("全量采集 step2: 跳过 K 线（INGEST_PRODUCTION_OHLCV=0）")
+            logger.info("全量采集 step2: 跳过 K 线（INGEST_PRODUCTION_OHLCV 未开启）")
 
-        # ③ 行业/财务：按开关按标拉取
-        symbols_full = [s.split(".")[0] for s in get_current_a_share_universe(force_refresh=False)] if need_symbols else []
+        # ③ 行业/财务：按开关按标拉取（使用带后缀的 symbol，与 get_current_a_share_universe 一致，写入 industry_revenue_summary 后 Module A 可查）
+        symbols_full = get_current_a_share_universe(force_refresh=False) if need_symbols else []
         n_total = len(symbols_full)
 
         if _ingest_enabled("INDUSTRY_REVENUE") and n_total:
@@ -249,13 +287,18 @@ def main() -> int:
             if _ingest_enabled("INDUSTRY_REVENUE") and not n_total:
                 logger.warning("全量采集 step3: 行业/财务 已开启但无标的，请先拉取 universe")
             else:
-                logger.info("全量采集 step3: 跳过行业/财务（INGEST_PRODUCTION_INDUSTRY_REVENUE=0）")
+                logger.info("全量采集 step3: 跳过行业/财务（INGEST_PRODUCTION_INDUSTRY_REVENUE 未开启）")
 
-        # ④ 新闻：按开关与时间线（全市场 + 按标，可设只保留最近 N 天）
+        # ④ 新闻：按开关与时间线（优先 INGEST_JQDATA_DATE_* 统一范围，否则保留最近 N 天）
         news_days = _news_days_back()
+        unified_start, unified_end = _unified_date_range()
         if _ingest_enabled("NEWS"):
-            logger.info("全量采集 step4: 新闻 | 先全市场+宏观，再按标的个股新闻（保留最近 %s 天）", news_days if news_days > 0 else "全部")
-            run_ingest_news(days_back=news_days if news_days > 0 else None)
+            if unified_start and unified_end:
+                logger.info("全量采集 step4: 新闻 | 先全市场+宏观，再按标的个股新闻（日期范围 %s ～ %s）", unified_start, unified_end)
+                run_ingest_news(date_start=unified_start, date_end=unified_end)
+            else:
+                logger.info("全量采集 step4: 新闻 | 先全市场+宏观，再按标的个股新闻（保留最近 %s 天）", news_days if news_days > 0 else "全部")
+                run_ingest_news(days_back=news_days if news_days > 0 else None)
             if n_total:
                 batch_size_ir = _batch_size()
                 batch_pause_ir = _batch_pause_sec()
@@ -265,7 +308,10 @@ def main() -> int:
                     logger.info("个股新闻 第 %s/%s 批（共 %s 只）", i + 1, len(batches_news), len(batch))
                     for j, sym in enumerate(batch):
                         try:
-                            run_ingest_news(symbol=sym, days_back=news_days if news_days > 0 else None)
+                            if unified_start and unified_end:
+                                run_ingest_news(symbol=sym, date_start=unified_start, date_end=unified_end)
+                            else:
+                                run_ingest_news(symbol=sym, days_back=news_days if news_days > 0 else None)
                         except Exception as e:
                             logger.warning("news symbol=%s failed: %s", sym, e)
                         if delay_sec > 0 and j < len(batch) - 1:
@@ -274,7 +320,7 @@ def main() -> int:
                         logger.info("批间暂停 %.0f 秒", batch_pause_ir)
                         time.sleep(batch_pause_ir)
         else:
-            logger.info("全量采集 step4: 跳过新闻（INGEST_PRODUCTION_NEWS=0）")
+            logger.info("全量采集 step4: 跳过新闻（INGEST_PRODUCTION_NEWS 未开启）")
 
         logger.info("全量采集完成（按 .env 开关与时间线执行，符合 AB 模块生产要求）")
         return 0
