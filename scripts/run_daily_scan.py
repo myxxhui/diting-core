@@ -21,9 +21,14 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     try:
-        universe = get_current_a_share_universe()
-        logger.info("run_daily_scan: len(universe)=%s, passing same list to Module A and B", len(universe))
-        # 同批一次获取，传入 A、B
+        from diting.universe import parse_symbol_list_from_env
+        # 与采集共用一套指定股票：DITING_SYMBOLS；未设置时再读 MODULE_AB_SYMBOLS
+        universe = parse_symbol_list_from_env("DITING_SYMBOLS") or parse_symbol_list_from_env("MODULE_AB_SYMBOLS")
+        if universe:
+            logger.info("指定股票模式: 共 %s 只，传入 Module A 与 B", len(universe))
+        else:
+            universe = get_current_a_share_universe()
+            logger.info("run_daily_scan: len(universe)=%s, passing same list to Module A and B", len(universe))
         classifier_results = SemanticClassifier.run_full(universe=universe)
         scanner_results = QuantScanner.run_full(universe=universe)
         logger.info("run_daily_scan: Module A classified %s, Module B signals %s", len(classifier_results), len(scanner_results))

@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier diting prod
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier diting prod
 
 # 采集相关 target 使用的 Python：akshare 要求 >= 3.8，优先 python3.8（若已安装）
 PYTHON_INGEST := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
@@ -69,6 +69,12 @@ report-production-data:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/check_production_data_report.py
 
+# DSN 与表一致性诊断：与 ingest 同源 config 取 DSN，列出 L1 ohlcv 全表概况与 symbol 样本、L2 industry_revenue_summary 样本（见 06_生产级数据要求_实践）
+check-ohlcv-consistency:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/check_ohlcv_table_consistency.py
+
 # Stage2-02 采集逻辑验证：执行 ingest_ohlcv、ingest_industry_revenue、ingest_news；退出码 0 表示通过。需先 make verify-db-connection。
 ingest-test:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
@@ -92,6 +98,16 @@ ingest-deploy:
 ingest-production:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
+
+# 同上，但后台运行：nohup 将输出写入 INGEST_PROD_LOG（默认 ingest-production.log），关终端不杀进程；查看进度: tail -f $(INGEST_PROD_LOG)
+INGEST_PROD_LOG ?= ingest-production.log
+ingest-production-background:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	log="$(INGEST_PROD_LOG)"; \
+	case "$$log" in /*) ;; *) log="$$root/$$log";; esac; \
+	echo "后台启动 make ingest-production，日志: $$log"; \
+	cd "$$root" && nohup $(MAKE) ingest-production >> "$$log" 2>&1 & \
+	_pid=$$!; echo "PID=$$_pid"; echo "查看进度: tail -f $$log"
 
 # 生产级日终增量：全 A 股标的、仅补最近 N 天（默认 7，可设 INGEST_PRODUCTION_INCREMENTAL_DAYS）；建议每个交易日结束后执行。
 # 不在此处 export 默认值，由脚本加载 .env；未设置的变量才用脚本内默认参数。

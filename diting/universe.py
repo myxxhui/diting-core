@@ -2,10 +2,64 @@
 # 统一接口 get_current_a_share_universe() -> List[str]；内部「检查有效条件→若无效则触发更新→读表返回」
 
 import logging
+import os
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_symbol(s: str) -> str:
+    """
+    将代码规范为带交易所后缀：000001 / 000001.SZ -> 000001.SZ，600000 -> 600000.SH。
+    沪市 6 开头用 .SH，其余用 .SZ。
+    """
+    s = (s or "").strip().upper()
+    if not s:
+        return ""
+    if ".SH" in s or ".SZ" in s:
+        code = s.split(".")[0]
+        return f"{code}.SH" if s.endswith(".SH") else f"{code}.SZ"
+    code = s.split(".")[0]
+    # 沪市：6 开头、58/51/50 开头（ETF/基金等）
+    if code.startswith("6") or code.startswith("58") or code.startswith("51") or code.startswith("50"):
+        return f"{code}.SH"
+    return f"{code}.SZ"
+
+
+def parse_symbol_list_from_env(env_key: str) -> Optional[List[str]]:
+    """
+    从环境变量解析指定股票列表，供采集或 AB 模块使用。
+    - 若未设置或为空：返回 None（调用方用全量 universe）。
+    - 若为逗号分隔字符串：按逗号拆分并规范化。
+    - 若为文件路径（存在且为文件）：按行读取，每行一个代码或 代码.后缀，去空、去重、规范化。
+    :return: 规范化后的 symbol 列表 ["000001.SZ", "600000.SH", ...]，或 None
+    """
+    raw = (os.environ.get(env_key) or "").strip()
+    if not raw:
+        return None
+    symbols: List[str] = []
+    if os.path.isfile(raw):
+        with open(raw, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip().split("#")[0].strip()
+                if line:
+                    symbols.append(normalize_symbol(line))
+    else:
+        for part in raw.replace("，", ",").split(","):
+            part = part.strip()
+            if part:
+                symbols.append(normalize_symbol(part))
+    if not symbols:
+        return None
+    seen = set()
+    out = []
+    for sym in symbols:
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    return out
 
 # 与 ingestion.universe 表名一致
 TABLE_NAME = "a_share_universe"
@@ -68,7 +122,7 @@ def get_current_a_share_universe(
 
             cur.execute(f"SELECT symbol FROM {TABLE_NAME} ORDER BY symbol")
             symbols = [r[0] for r in cur.fetchall()]
-            logger.info("get_current_a_share_universe: len(universe)=%s", len(symbols))
+            logger.info("从 L1 读取全 A 股标的数量: %s", len(symbols))
             return symbols
         finally:
             cur.close()

@@ -6,6 +6,7 @@
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
@@ -31,7 +32,7 @@ from diting.ingestion import (
     run_ingest_industry_revenue,
     run_ingest_news,
 )
-from diting.universe import get_current_a_share_universe
+from diting.universe import get_current_a_share_universe, parse_symbol_list_from_env
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -55,19 +56,36 @@ def main() -> int:
     days_back = max(1, min(365, days_back))
 
     try:
-        logger.info("生产级日终增量 step1: 刷新 universe（全A股）")
-        run_ingest_universe()
-
-        symbols_ts = get_current_a_share_universe(force_refresh=False)
+        specified = parse_symbol_list_from_env("DITING_SYMBOLS") or parse_symbol_list_from_env("INGEST_PRODUCTION_SYMBOLS")
+        if not specified:
+            logger.info("生产级日终增量 step1: 刷新 universe（全A股）")
+            run_ingest_universe()
+            symbols_ts = get_current_a_share_universe(force_refresh=False)
+        else:
+            symbols_ts = specified
+            logger.info("指定股票增量: 共 %s 只（DITING_SYMBOLS / INGEST_PRODUCTION_SYMBOLS）", len(symbols_ts))
         if not symbols_ts:
-            logger.error("universe 表无标的，无法执行增量 OHLCV 采集")
+            logger.error("universe 表无标的或未配置指定股票，无法执行增量采集")
             return 1
         symbols_raw = [s.split(".")[0] for s in symbols_ts]
         logger.info("生产级日终增量 step2: 共 %s 只标的，仅补最近 %s 天日线", len(symbols_raw), days_back)
 
         run_ingest_ohlcv(symbols=symbols_raw, days_back=days_back)
 
-        run_ingest_industry_revenue()
+        # 行业/财务：与全量一致，按标的逐只拉取并写入 L2 industry_revenue_summary（原误为无参只采 000001，已修复）
+        delay_sec = float(os.environ.get("INGEST_EXTRA_DELAY_SEC", "2").strip() or "2")
+        try:
+            delay_sec = max(0.0, min(30.0, delay_sec))
+        except ValueError:
+            delay_sec = 2.0
+        for j, sym in enumerate(symbols_ts):
+            try:
+                run_ingest_industry_revenue(sym)
+            except Exception as e:
+                logger.warning("industry_revenue symbol=%s failed: %s", sym, e)
+            if delay_sec > 0 and j < len(symbols_ts) - 1:
+                time.sleep(delay_sec)
+
         run_ingest_news()
 
         logger.info("生产级日终增量完成（全 A 股 + 最近 %s 天）", days_back)

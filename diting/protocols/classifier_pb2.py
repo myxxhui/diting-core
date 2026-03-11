@@ -9,14 +9,16 @@ class DomainTag:
     TECH = 2
     GEO = 3
     UNKNOWN = 4
+    DOMAIN_CUSTOM = 5  # 自定义类别，展示名由 domain_label 提供
 
 
 class TagWithConfidence:
-    """单条 Tag + 置信度 (0.0-1.0)。"""
+    """单条 Tag + 置信度 (0.0-1.0)；DOMAIN_CUSTOM 时用 domain_label 展示。"""
 
-    def __init__(self, domain_tag=0, confidence=0.0):
+    def __init__(self, domain_tag=0, confidence=0.0, domain_label=""):
         self.domain_tag = domain_tag  # DomainTag 枚举值
         self.confidence = float(confidence)
+        self.domain_label = domain_label or ""  # 自定义类别展示名
 
 
 class ClassifierOutput:

@@ -14,6 +14,9 @@ from diting.protocols.classifier_pb2 import (
     TagWithConfidence,
 )
 
+# 规则键 -> DomainTag（仅 agri/tech/geo 使用枚举，其余用 DOMAIN_CUSTOM + label）
+_DOMAIN_TAG_BY_ID = {"agri": DomainTag.AGRI, "tech": DomainTag.TECH, "geo": DomainTag.GEO}
+
 logger = logging.getLogger(__name__)
 
 # 默认规则路径：与 DNA delivery_scope、实践文档约定一致
@@ -39,12 +42,6 @@ def load_rules(path: Optional[os.PathLike] = None) -> Dict[str, Any]:
     path = path or _find_rules_path()
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
-
-
-def _tag_for_domain(domain: str) -> int:
-    """规则键 agri/tech/geo -> DomainTag 枚举值。"""
-    mapping = {"agri": DomainTag.AGRI, "tech": DomainTag.TECH, "geo": DomainTag.GEO}
-    return mapping.get(domain.lower(), DomainTag.UNKNOWN)
 
 
 class SemanticClassifier:
@@ -80,38 +77,46 @@ class SemanticClassifier:
     ) -> ClassifierOutput:
         """
         对标的进行分类，返回 ClassifierOutput（Domain Tag 列表 + 置信度）。
+        按 YAML 中 categories 顺序匹配；agri/tech/geo 对应枚举，其余为 DOMAIN_CUSTOM + domain_label。
         """
         industry, revenue_ratio, rnd_ratio, commodity_ratio = self._provider(symbol)
         tags_with_conf: List[TagWithConfidence] = []
+        categories = self._rules.get("categories") or []
+        # 兼容旧版 YAML：仅有 agri/tech/geo 时按原逻辑
+        if not categories and (self._rules.get("agri") or self._rules.get("tech") or self._rules.get("geo")):
+            tags_with_conf = self._classify_legacy(industry, revenue_ratio, rnd_ratio, commodity_ratio)
+        else:
+            confidence_matched = 0.95
+            for cat in categories:
+                cat_id = (cat.get("id") or "").strip().lower()
+                label = (cat.get("label") or cat.get("id") or "").strip() or cat_id
+                keywords = cat.get("industry_keywords") or []
+                keyword_match = any(k in industry for k in keywords)
+                rev_th = cat.get("revenue_ratio_threshold")
+                rnd_th = cat.get("rnd_ratio_threshold")
+                comm_th = cat.get("commodity_revenue_ratio_threshold")
+                ratio_match = (
+                    (rev_th is not None and revenue_ratio >= rev_th)
+                    or (rnd_th is not None and rnd_ratio >= rnd_th)
+                    or (comm_th is not None and commodity_ratio >= comm_th)
+                )
+                if not keyword_match and not ratio_match:
+                    continue
+                if cat_id in _DOMAIN_TAG_BY_ID:
+                    domain_tag = _DOMAIN_TAG_BY_ID[cat_id]
+                    tags_with_conf.append(
+                        TagWithConfidence(domain_tag=domain_tag, confidence=confidence_matched)
+                    )
+                else:
+                    tags_with_conf.append(
+                        TagWithConfidence(
+                            domain_tag=DomainTag.DOMAIN_CUSTOM,
+                            confidence=confidence_matched,
+                            domain_label=label,
+                        )
+                    )
+                break  # 按顺序只取第一个匹配
 
-        # AGRI
-        agri_cfg = self._rules.get("agri") or {}
-        keywords = agri_cfg.get("industry_keywords") or []
-        rev_th = agri_cfg.get("revenue_ratio_threshold") or 0.5
-        if any(k in industry for k in keywords) or revenue_ratio >= rev_th:
-            tags_with_conf.append(
-                TagWithConfidence(domain_tag=DomainTag.AGRI, confidence=0.95)
-            )
-
-        # TECH
-        tech_cfg = self._rules.get("tech") or {}
-        keywords = tech_cfg.get("industry_keywords") or []
-        rnd_th = tech_cfg.get("rnd_ratio_threshold") or 0.1
-        if any(k in industry for k in keywords) or rnd_ratio >= rnd_th:
-            tags_with_conf.append(
-                TagWithConfidence(domain_tag=DomainTag.TECH, confidence=0.95)
-            )
-
-        # GEO
-        geo_cfg = self._rules.get("geo") or {}
-        keywords = geo_cfg.get("industry_keywords") or []
-        comm_th = geo_cfg.get("commodity_revenue_ratio_threshold") or 0.5
-        if any(k in industry for k in keywords) or commodity_ratio >= comm_th:
-            tags_with_conf.append(
-                TagWithConfidence(domain_tag=DomainTag.GEO, confidence=0.95)
-            )
-
-        # 若未匹配任何领域，归为 UNKNOWN
         unknown_cfg = self._rules.get("unknown") or {}
         default_conf = unknown_cfg.get("default_confidence") or 0.5
         if not tags_with_conf:
@@ -125,6 +130,22 @@ class SemanticClassifier:
             correlation_id=correlation_id,
         )
 
+    def _classify_legacy(
+        self, industry: str, revenue_ratio: float, rnd_ratio: float, commodity_ratio: float
+    ) -> List[TagWithConfidence]:
+        """兼容旧版 YAML（仅有 agri/tech/geo 顶层键）。"""
+        tags: List[TagWithConfidence] = []
+        agri_cfg = self._rules.get("agri") or {}
+        if any(k in industry for k in (agri_cfg.get("industry_keywords") or [])) or revenue_ratio >= (agri_cfg.get("revenue_ratio_threshold") or 0.5):
+            tags.append(TagWithConfidence(domain_tag=DomainTag.AGRI, confidence=0.95))
+        tech_cfg = self._rules.get("tech") or {}
+        if any(k in industry for k in (tech_cfg.get("industry_keywords") or [])) or rnd_ratio >= (tech_cfg.get("rnd_ratio_threshold") or 0.1):
+            tags.append(TagWithConfidence(domain_tag=DomainTag.TECH, confidence=0.95))
+        geo_cfg = self._rules.get("geo") or {}
+        if any(k in industry for k in (geo_cfg.get("industry_keywords") or [])) or commodity_ratio >= (geo_cfg.get("commodity_revenue_ratio_threshold") or 0.5):
+            tags.append(TagWithConfidence(domain_tag=DomainTag.GEO, confidence=0.95))
+        return tags
+
     def classify_batch(
         self,
         universe: List[str],
@@ -133,7 +154,7 @@ class SemanticClassifier:
         """
         对标的池全量分类，与 09_/11_ 约定一致；同批与 Module B 使用同一 universe 时由调度保证。
         """
-        logger.info("classify_batch: len(universe)=%s", len(universe))
+        logger.info("本批分类标的数量: %s", len(universe))
         return [self.classify(s, correlation_id=correlation_id) for s in universe]
 
     @classmethod
@@ -148,9 +169,11 @@ class SemanticClassifier:
         再对全部 N 只全量分类；日志输出 len(universe)。与 11_/09_ 同批一致约定一致。
         """
         if universe is None:
-            from diting.universe import get_current_a_share_universe
-            universe = get_current_a_share_universe()
-        logger.info("SemanticClassifier.run_full: len(universe)=%s", len(universe))
+            from diting.universe import get_current_a_share_universe, parse_symbol_list_from_env
+            universe = parse_symbol_list_from_env("DITING_SYMBOLS") or parse_symbol_list_from_env("MODULE_AB_SYMBOLS")
+            if not universe:
+                universe = get_current_a_share_universe()
+        logger.info("语义分类器 run_full：本批 universe 数量 %s", len(universe))
         inst = cls(**classifier_kwargs)
         return inst.classify_batch(universe, correlation_id=correlation_id)
 

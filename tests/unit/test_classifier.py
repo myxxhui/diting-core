@@ -41,6 +41,7 @@ def test_domain_tag_enum_values():
     assert DomainTag.TECH == 2
     assert DomainTag.GEO == 3
     assert DomainTag.UNKNOWN == 4
+    assert DomainTag.DOMAIN_CUSTOM == 5
 
 
 # ----- 结构 100%：目录与 config 存在、YAML 可加载 -----
@@ -53,10 +54,8 @@ def test_classifier_package_and_config_exist():
     rules_path = root / "config" / "classifier_rules.yaml"
     assert rules_path.is_file(), "config/classifier_rules.yaml 应存在"
     rules = load_rules(rules_path)
-    assert "agri" in rules
-    assert "tech" in rules
-    assert "geo" in rules
     assert "unknown" in rules
+    assert "categories" in rules or ("agri" in rules and "tech" in rules and "geo" in rules)
 
 
 # ----- 逻辑功能 100%：AGRI/TECH/GEO/UNKNOWN、Mock 标的 -----
@@ -108,14 +107,14 @@ def test_confidence_in_range():
 
 
 def test_rules_driven_by_yaml():
-    """变更 YAML 后分类结果随之变化。"""
+    """变更 YAML 后分类结果随之变化（兼容旧版 agri/tech/geo 结构）。"""
     rules = {
         "agri": {"industry_keywords": ["农林牧渔"], "revenue_ratio_threshold": 0.5},
         "tech": {"industry_keywords": ["电子"], "rnd_ratio_threshold": 0.1},
         "geo": {"industry_keywords": ["有色金属"], "commodity_revenue_ratio_threshold": 0.5},
         "unknown": {"default_confidence": 0.5},
     }
-    clf = SemanticClassifier(rules=rules)
+    clf = SemanticClassifier(rules=rules)  # 无 categories 时走 _classify_legacy
     out = clf.classify("000998.SZ")
     assert any(t.domain_tag == DomainTag.AGRI for t in out.tags)
 

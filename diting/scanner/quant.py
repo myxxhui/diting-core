@@ -31,7 +31,9 @@ class QuantScanner:
         再对全部 N 只全量扫描；日志输出 len(universe)。与 11_/09_ 同批一致约定一致。
         """
         if universe is None:
-            from diting.universe import get_current_a_share_universe
-            universe = get_current_a_share_universe()
+            from diting.universe import get_current_a_share_universe, parse_symbol_list_from_env
+            universe = parse_symbol_list_from_env("DITING_SYMBOLS") or parse_symbol_list_from_env("MODULE_AB_SYMBOLS")
+            if not universe:
+                universe = get_current_a_share_universe()
         logger.info("QuantScanner.run_full: len(universe)=%s", len(universe))
         return cls().scan_market(universe)

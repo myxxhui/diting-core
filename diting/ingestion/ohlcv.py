@@ -384,16 +384,18 @@ def run_ingest_ohlcv(
     else:
         symbols = symbols or REAL_TEST_SYMBOLS_15
         source = _get_ohlcv_source()
-        end_dt = datetime.utcnow()
-        # JQData：优先用 INGEST_JQDATA_DATE_START/END 指定日期范围，否则按 DAYS_BACK 计算
-        if source == "jqdata":
-            start_str, end_str = _jqdata_date_range()
-            logger.info("OHLCV 拉取：JQData 日期范围 %s ～ %s", start_str, end_str)
+        # 优先用 INGEST_JQDATA_DATE_START/END 统一范围（与生产脚本 _has_ohlcv 判定一致，便于「已有数据则跳过」）
+        start_str, end_str = _jqdata_date_range()
+        if len(start_str) >= 8 and len(end_str) >= 8:
+            logger.info("K 线 日期范围 %s ～ %s（与 INGEST_JQDATA_DATE_* 一致）", start_str, end_str)
         else:
+            end_dt = datetime.utcnow()
             start = end_dt - timedelta(days=days_back)
             end = end_dt
             start_str = start.strftime("%Y%m%d")
             end_str = end.strftime("%Y%m%d")
+            if source == "jqdata":
+                logger.info("OHLCV 拉取：JQData 日期范围 %s ～ %s", start_str, end_str)
         all_rows = []
         workers = _concurrent_workers()
         if workers > 1:
@@ -417,14 +419,15 @@ def run_ingest_ohlcv(
                         logger.exception("ingest_ohlcv symbol=%s failed: %s", sym, e)
                         raise
         else:
-            logger.info("OHLCV 拉取：数据源=%s 串行（CONCURRENT=1），共 %s 只", source, len(symbols))
+            logger.info("K 线 数据源=%s，本批 %s 只，串行采集", source, len(symbols))
             for i, sym in enumerate(symbols):
                 try:
                     rows = _fetch_ohlcv(sym, period, start_str, end_str)
                     all_rows.extend(rows)
-                    # 每 10 只或首/末只打一条进度，避免长时间无输出
-                    if (i + 1) % 10 == 0 or i == 0 or i == len(symbols) - 1:
-                        logger.info("OHLCV 进度 %s/%s 只（本批）", i + 1, len(symbols))
+                    if len(symbols) == 1:
+                        logger.info("K 线 采集完成 %s 条（%s）", len(rows), sym)
+                    elif (i + 1) % 10 == 0 or i == 0 or i == len(symbols) - 1:
+                        logger.info("K 线 进度 %s/%s 只（本批）", i + 1, len(symbols))
                     delay = _delay_between_symbols_sec()
                     if delay > 0 and i < len(symbols) - 1:
                         time.sleep(delay)
@@ -438,8 +441,9 @@ def run_ingest_ohlcv(
     dsn = get_timescale_dsn()
     conn = psycopg2.connect(dsn)
     try:
-        logger.info("OHLCV 本批拉取完成，正在写入数据库（共 %s 行，可能需数十秒）…", len(all_rows))
+        logger.info("K 线 正在写入 L1（共 %s 行）…", len(all_rows))
         n = write_ohlcv_batch(conn, all_rows)
+        logger.info("K 线 L1 写入完成 %s 行", n)
         return n
     finally:
         conn.close()

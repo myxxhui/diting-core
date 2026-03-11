@@ -49,7 +49,7 @@ def get_l2_industry_revenue_batch(
         finally:
             conn.close()
     except Exception as e:
-        logger.warning("L2 batch lookup 失败: %s", e)
+        logger.warning("L2 批量查询行业/营收失败: %s", e)
     return out
 
 

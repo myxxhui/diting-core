@@ -1,27 +1,57 @@
 # [Ref: 01_语义分类器] [Ref: dna_module_a.classification_rules]
-# 分类规则由 YAML 驱动，禁止在代码中硬编码；与 09_ Module A、DNA 语义一致。
+# 分类规则由 YAML 驱动；categories 可扩展，包含原始数据/静态数据中的行业类别，不强制归入农业/科技/周期。
 
-# AGRI: 申万行业=农林牧渔 或 营收占比>50%
-agri:
-  industry_keywords:
-    - 农林牧渔
-  revenue_ratio_threshold: 0.5   # 主营营收占比超过此值可归为 AGRI
+# 类别列表：按顺序匹配，先匹配先采用。id 为 agri/tech/geo 时对应 DomainTag，其余为自定义类别（DOMAIN_CUSTOM + label）
+# 顺序建议：先行业关键词明确的（如 电子/计算机/通信），再农业/周期，再其他自定义
+categories:
+  - id: tech
+    label: 科技
+    industry_keywords:
+      - 电子
+      - 计算机
+      - 通信
+    rnd_ratio_threshold: 0.1
+  - id: agri
+    label: 农业
+    industry_keywords:
+      - 农林牧渔
+    revenue_ratio_threshold: 0.5
+  - id: geo
+    label: 周期
+    industry_keywords:
+      - 有色金属
+      - 石油石化
+    commodity_revenue_ratio_threshold: 0.5
+  # 以下为自定义类别，与原始/静态行业一致
+  - id: 国防军工
+    label: 国防军工
+    industry_keywords:
+      - 国防军工
+  - id: 医药生物
+    label: 医药生物
+    industry_keywords:
+      - 医药生物
+  - id: 电力设备
+    label: 电力设备
+    industry_keywords:
+      - 电力设备
+  - id: 传媒
+    label: 传媒
+    industry_keywords:
+      - 传媒
+  - id: 环保
+    label: 环保
+    industry_keywords:
+      - 环保
+  - id: 机械设备
+    label: 机械设备
+    industry_keywords:
+      - 机械设备
+  - id: 银行
+    label: 银行
+    industry_keywords:
+      - 银行
 
-# TECH: 申万行业=电子/计算机/通信 或 研发投入>10%
-tech:
-  industry_keywords:
-    - 电子
-    - 计算机
-    - 通信
-  rnd_ratio_threshold: 0.1       # 研发投入占比超过此值可归为 TECH
-
-# GEO: 申万行业=有色金属/石油石化 或 大宗商品营收>50%
-geo:
-  industry_keywords:
-    - 有色金属
-    - 石油石化
-  commodity_revenue_ratio_threshold: 0.5
-
-# UNKNOWN: 无法匹配上述规则时的默认出口
+# 无法匹配任一 category 时的默认出口
 unknown:
   default_confidence: 0.5

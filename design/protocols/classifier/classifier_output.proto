@@ -11,6 +11,8 @@ enum DomainTag {
   TECH = 2;
   GEO = 3;
   UNKNOWN = 4;
+  // 自定义类别：由 YAML 配置的行业等，展示名由 domain_label 提供
+  DOMAIN_CUSTOM = 5;
 }
 
 message ClassifierOutput {
@@ -22,4 +24,6 @@ message ClassifierOutput {
 message TagWithConfidence {
   DomainTag domain_tag = 1;
   double confidence = 2;
+  // 当 domain_tag 为 DOMAIN_CUSTOM 时，为类别展示名（如 国防军工、医药生物）
+  string domain_label = 3;
 }
