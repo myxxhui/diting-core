@@ -11,7 +11,7 @@ from typing import Optional
 import psycopg2
 
 from diting.ingestion.config import get_pg_l2_dsn
-from diting.ingestion.l2_writer import write_data_version
+from diting.ingestion.l2_writer import write_data_version, write_news_content_batch
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +28,33 @@ def _is_mock() -> bool:
     return os.environ.get("DITING_INGEST_MOCK", "").strip().lower() in ("1", "true", "yes")
 
 
+def _patch_eastmoney_headers():
+    """AkShare 1.17.x 的 stock_news_em / js_news 等调用 requests.get 时不带浏览器请求头，
+    东方财富对无 User-Agent 的请求返回空响应。注入 monkey-patch 确保 eastmoney 请求带正确头。"""
+    import requests as _req
+    if getattr(_req, "_eastmoney_patched", False):
+        return
+    _orig = _req.get
+
+    def _get_with_headers(url, *a, **kw):
+        if "eastmoney.com" in str(url or ""):
+            h = kw.setdefault("headers", {})
+            h.setdefault("User-Agent",
+                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            h.setdefault("Referer", "https://so.eastmoney.com/")
+            kw.setdefault("timeout", 30)
+        return _orig(url, *a, **kw)
+
+    _req.get = _get_with_headers
+    _req._eastmoney_patched = True
+
+
 def _fetch_akshare_news(max_retries: int = 3, retry_delay: float = 2.0) -> list:
     """国内：AkShare 财经资讯。优先 js_news；不可用时退化为 stock_news_em（个股新闻）。
     东方财富接口常返回空/非 JSON 时不再抛异常，降级为返回空列表，保证采集流水继续。
     """
+    _patch_eastmoney_headers()
     for attempt in range(max_retries):
         try:
             import akshare as ak
@@ -45,12 +68,21 @@ def _fetch_akshare_news(max_retries: int = 3, retry_delay: float = 2.0) -> list:
             if df is None or df.empty:
                 return []
             return df.to_dict("records")
+        except (ValueError, KeyError) as e:
+            err_str = str(e).lower()
+            if "json" in err_str or "expecting value" in err_str or "decode" in err_str:
+                logger.debug("akshare news JSON 解析失败（东方财富空响应），跳过: %s", e)
+                return []
+            logger.warning("akshare news attempt %s failed: %s", attempt + 1, e)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+            else:
+                return []
         except Exception as e:
             logger.warning("akshare news attempt %s failed: %s", attempt + 1, e)
             if attempt < max_retries - 1:
                 time.sleep(retry_delay * (attempt + 1))
             else:
-                # 重试耗尽：降级为无新闻，不抛异常，避免整条采集流水报错（东方财富反爬/接口变更常见）
                 logger.warning("akshare news all retries exhausted, skipping news step: %s", e)
                 return []
     return []
@@ -62,6 +94,7 @@ def _fetch_akshare_stock_news_em(
     retry_delay: float = 2.0,
 ) -> list:
     """按标的拉取东方财富个股新闻；用于生产级每标的数据。失败时返回空列表，不抛异常。"""
+    _patch_eastmoney_headers()
     for attempt in range(max_retries):
         try:
             import akshare as ak
@@ -72,6 +105,16 @@ def _fetch_akshare_stock_news_em(
             if df is None or df.empty:
                 return []
             return df.to_dict("records")
+        except (ValueError, KeyError) as e:
+            err_str = str(e).lower()
+            if "json" in err_str or "expecting value" in err_str or "decode" in err_str:
+                logger.debug("stock_news_em symbol=%s JSON 解析失败（东方财富反爬/空响应），跳过: %s", symbol, e)
+                return []
+            logger.warning("akshare stock_news_em symbol=%s attempt %s failed: %s", symbol, attempt + 1, e)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+            else:
+                return []
         except Exception as e:
             logger.warning("akshare stock_news_em symbol=%s attempt %s failed: %s", symbol, attempt + 1, e)
             if attempt < max_retries - 1:
@@ -187,6 +230,37 @@ def _filter_news_by_date_range(records: list, start_date, end_date) -> list:
     return out
 
 
+def _records_to_rows(records: list, symbol: str, source: str, source_type: str = "news") -> list:
+    """将 AkShare / JQData 返回的 dict list 转为 write_news_content_batch 所需的 tuple list。
+    字段映射兼容东方财富（stock_news_em）和 JQData 的多种字段名。"""
+    if not records:
+        return []
+    rows = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        title = (
+            r.get("新闻标题") or r.get("title") or r.get("标题") or r.get("ann_title") or ""
+        ).strip()
+        if not title:
+            continue
+        content = (
+            r.get("新闻内容") or r.get("content") or r.get("内容")
+            or r.get("新闻摘要") or r.get("summary") or ""
+        ).strip()
+        url = (
+            r.get("新闻链接") or r.get("url") or r.get("链接")
+            or r.get("link") or ""
+        ).strip()
+        keywords = (
+            r.get("关键词") or r.get("keywords") or ""
+        ).strip()
+        st = r.get("_source_type") or source_type
+        pub_dt = _parse_news_date(r)
+        rows.append((symbol, source, st, title, content, url, keywords, pub_dt))
+    return rows
+
+
 def run_ingest_news(
     symbol: str = None,
     days_back: int = None,
@@ -296,8 +370,11 @@ def run_ingest_news(
                         file_size=file_size,
                         checksum="",
                     )
+                    content_rows = _records_to_rows(records, symbol, "jqdata")
+                    if content_rows:
+                        write_news_content_batch(conn, content_rows)
                     written += 1
-                    logger.info("ingest_news: JQData symbol=%s news=%s announcements=%s", symbol, len(news_records), len(ann_records))
+                    logger.info("ingest_news: JQData symbol=%s news=%s announcements=%s content_rows=%s", symbol, len(news_records), len(ann_records), len(content_rows))
                 except Exception as e:
                     logger.warning("ingest_news jqdata symbol=%s failed: %s", symbol, e)
                 return written
@@ -323,7 +400,8 @@ def run_ingest_news(
         # 按标的：个股新闻
         if symbol:
             try:
-                records = _fetch_akshare_stock_news_em(symbol)
+                sym_raw = symbol.split(".")[0]
+                records = _fetch_akshare_stock_news_em(sym_raw)
                 if date_start and date_end:
                     start_d = _parse_date_bound(date_start)
                     end_d = _parse_date_bound(date_end)
@@ -343,6 +421,10 @@ def run_ingest_news(
                     file_size=file_size,
                     checksum="",
                 )
+                content_rows = _records_to_rows(records, symbol, "akshare")
+                if content_rows:
+                    write_news_content_batch(conn, content_rows)
+                    logger.info("ingest_news: akshare symbol=%s persisted %s news rows to news_content", symbol, len(content_rows))
                 return 1
             except Exception as e:
                 logger.warning("ingest_news symbol=%s failed: %s", symbol, e)
@@ -370,6 +452,9 @@ def run_ingest_news(
                     file_size=len(str(records)),
                     checksum="",
                 )
+                market_rows = _records_to_rows(records, "_MARKET_", "akshare")
+                if market_rows:
+                    write_news_content_batch(conn, market_rows)
                 written += 1
         except Exception as e:
             logger.exception("ingest_news akshare failed: %s", e)

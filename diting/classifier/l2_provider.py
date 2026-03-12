@@ -13,8 +13,15 @@ def get_l2_industry_revenue_batch(
     dsn: str, symbols: List[str]
 ) -> Dict[str, Tuple[str, float, float, float]]:
     """
-    一次查询 L2 获取多只标的的行业/营收数据，返回 symbol -> (industry_name, revenue_ratio, rnd_ratio, commodity_ratio)。
-    表不存在或某 symbol 无记录时，该 symbol 不在返回 dict 中（调用方用默认值填充）。
+    一次查询 L2 获取多只标的的行业/营收数据。
+    返回 symbol -> (industry_name, revenue_ratio, rnd_ratio, commodity_ratio)。
+
+    字段语义：
+      revenue_ratio   — 主营业务利润率
+      rnd_ratio       — 三项费用比重（管理+销售+财务，非独立研发费率）
+      commodity_ratio — 大宗商品营收占比（行业规则估算）
+
+    分类器通过 industry_name 关键词匹配打标签，不依赖 rnd_ratio 阈值。
     """
     import psycopg2
 

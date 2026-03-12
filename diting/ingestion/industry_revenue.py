@@ -44,9 +44,25 @@ def _load_industry_fallback(symbol: str) -> Optional[str]:
     return _fallback_cache.get(symbol)
 
 
+def _safe_float(v, default: float = 0.0) -> float:
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        import math
+        return default if math.isnan(f) or math.isinf(f) else f
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_industry_revenue_row(data: dict) -> tuple:
     """从采集得到的 dict 中解析 (industry_name, revenue_ratio, rnd_ratio, commodity_ratio)。
-    支持东方财富 stock_individual_info_em 的 item/value 转 dict（如「行业」）及 JQ 等 key 命名。"""
+
+    字段语义：
+      revenue_ratio  — 主营业务利润率（AkShare: 主营业务利润率(%) 或 销售毛利率(%)）
+      rnd_ratio      — 三项费用比重（管理+销售+财务费用占营收比例，非独立研发费率）
+      commodity_ratio — 大宗商品营收占比（由行业名规则估算）
+    """
     industry_name = ""
     revenue_ratio = 0.0
     rnd_ratio = 0.0
@@ -58,20 +74,17 @@ def _parse_industry_revenue_row(data: dict) -> tuple:
         if k in ("行业", "所属行业", "申万行业"):
             industry_name = str(v).strip() if v is not None else ""
         elif k in ("主营业务收入占比", "主营营收占比", "revenue_ratio"):
-            try:
-                revenue_ratio = float(v) if v is not None else 0.0
-            except (TypeError, ValueError):
-                pass
+            revenue_ratio = _safe_float(v)
         elif k in ("研发投入占比", "研发支出占比", "rnd_ratio"):
-            try:
-                rnd_ratio = float(v) if v is not None else 0.0
-            except (TypeError, ValueError):
-                pass
+            rnd_ratio = _safe_float(v)
         elif k in ("大宗商品营收占比", "commodity_ratio"):
-            try:
-                commodity_ratio = float(v) if v is not None else 0.0
-            except (TypeError, ValueError):
-                pass
+            commodity_ratio = _safe_float(v)
+        elif k == "主营业务利润率(%)" and revenue_ratio == 0.0:
+            revenue_ratio = _safe_float(v) / 100.0
+        elif k == "销售毛利率(%)" and revenue_ratio == 0.0:
+            revenue_ratio = _safe_float(v) / 100.0
+        elif k == "三项费用比重" and rnd_ratio == 0.0:
+            rnd_ratio = _safe_float(v) / 100.0
     return (industry_name, revenue_ratio, rnd_ratio, commodity_ratio)
 
 
@@ -197,14 +210,83 @@ def _fetch_akshare_financial_abstract(
     return None
 
 
+def _fetch_akshare_financial_indicator(
+    symbol: str,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> Optional[dict]:
+    """从 stock_financial_analysis_indicator 获取财务分析指标（如主营业务利润率、销售毛利率、三项费用比重等），
+    返回最新一期数据的 dict（列名→值），供 _parse_industry_revenue_row 解析 revenue_ratio/rnd_ratio。"""
+    _apply_akshare_proxy()
+    import akshare as ak
+
+    if not hasattr(ak, "stock_financial_analysis_indicator"):
+        return None
+    from datetime import datetime as _dt
+    start_year = str(_dt.now().year - 1)
+    for attempt in range(max_retries):
+        try:
+            df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year=start_year)
+            if df is None or df.empty:
+                return None
+            latest = df.iloc[-1]
+            return {str(col): latest[col] for col in df.columns}
+        except Exception as e:
+            logger.warning("akshare stock_financial_analysis_indicator attempt %s failed: %s", attempt + 1, e)
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+            else:
+                return None
+    return None
+
+
+def _ensure_industry_and_ratios(symbol: str, data: dict) -> tuple:
+    """从 data 解析 industry/ratios，行业名为空时无条件走 fallback CSV 补全；返回 (iname, rev, rnd, comm)。"""
+    iname, rev, rnd, comm = _parse_industry_revenue_row(data)
+    if not (iname or "").strip():
+        fallback = _load_industry_fallback(symbol)
+        if fallback:
+            iname = fallback
+            logger.info("industry_revenue: symbol=%s 行业由 fallback 补全 → %s", symbol, iname)
+        else:
+            logger.warning("industry_revenue: symbol=%s 行业为空（API 未返回、fallback 无匹配）", symbol)
+    return iname, rev, rnd, comm
+
+
+_COMMODITY_KEYWORDS = (
+    "有色金属", "工业金属", "贵金属", "稀有金属", "金属",
+    "石油石化", "石油", "石化", "油气", "油服",
+    "煤炭", "焦煤", "动力煤",
+    "钢铁", "铁矿", "特钢", "普钢",
+    "化工", "基础化学", "化学", "化肥", "农药",
+)
+
+
+def _estimate_commodity_ratio(industry_name: str) -> float:
+    """根据行业名估算大宗商品营收占比（无 API 直接提供此字段）。
+    匹配申万一/二/三级行业关键词。"""
+    if not industry_name:
+        return 0.0
+    for keyword in _COMMODITY_KEYWORDS:
+        if keyword in industry_name:
+            return 0.7
+    return 0.0
+
+
 def run_ingest_industry_revenue(symbol: str = None) -> int:
     """
     执行 ingest_industry_revenue：从 AkShare 拉取财务摘要并写入 L2 data_versions 与 industry_revenue_summary。
     工作目录: diting-core。symbol 建议为带交易所后缀（如 000001.SZ），与 get_current_a_share_universe 一致；
     调用外部 API 时使用无后缀代码，写入 industry_revenue_summary 时保留传入的 symbol 供 Module A 查询。
+
+    采集策略（AkShare 源）：
+    1. stock_individual_info_em → 行业名
+    2. stock_financial_analysis_indicator → 财务指标（主营利润率→revenue_ratio、三项费用比重→rnd_ratio）
+    3. 行业名为空时无条件使用 industry_fallback.csv 补全
+    4. 大宗商品占比由行业名规则估算
     """
     symbol = (symbol or DEFAULT_SYMBOL).strip()
-    api_symbol = symbol.split(".")[0] if "." in symbol else symbol  # AkShare/JQ 使用无后缀
+    api_symbol = symbol.split(".")[0] if "." in symbol else symbol
     now = datetime.now(timezone.utc)
     version_id = f"industry_revenue_{symbol}_{now.strftime('%Y%m%d%H%M%S')}"
     file_path = f"l2/industry_revenue/{symbol}.json"
@@ -214,112 +296,146 @@ def run_ingest_industry_revenue(symbol: str = None) -> int:
         dsn = get_pg_l2_dsn()
         conn = psycopg2.connect(dsn)
         try:
-            write_data_version(
-                conn,
-                data_type=DATA_TYPE,
-                version_id=version_id,
-                timestamp=now,
-                file_path=file_path,
-                file_size=file_size,
-                checksum="",
-            )
+            write_data_version(conn, data_type=DATA_TYPE, version_id=version_id,
+                               timestamp=now, file_path=file_path, file_size=file_size, checksum="")
             logger.info("ingest_industry_revenue: mock mode, 1 version")
             return 1
         finally:
             conn.close()
-    else:
-        source = _get_ingest_source()
-        if source == "jqdata":
-            data = _fetch_jqdata_financial(api_symbol)
-            if data:
-                try:
-                    for k, v in data.items():
-                        if hasattr(v, "isoformat"):
-                            data[k] = v.isoformat()
-                    payload = json.dumps(data, ensure_ascii=False, default=str)
-                    file_size = len(payload.encode("utf-8"))
-                except Exception:
-                    file_size = 0
-                dsn = get_pg_l2_dsn()
-                conn = psycopg2.connect(dsn)
-                try:
-                    write_data_version(
-                        conn,
-                        data_type=DATA_TYPE,
-                        version_id=version_id,
-                        timestamp=now,
-                        file_path=file_path,
-                        file_size=file_size,
-                        checksum="",
-                    )
-                    try:
-                        iname, rev, rnd, comm = _parse_industry_revenue_row(data)
-                        if not (iname or "").strip():
-                            iname = _load_industry_fallback(symbol) or ""
-                            if iname:
-                                logger.debug("industry_revenue: symbol=%s industry_name 由 fallback 补全", symbol)
-                        _upsert_industry_revenue_summary(conn, symbol, iname, rev, rnd, comm)
-                    except Exception as e:
-                        logger.debug("upsert industry_revenue_summary: %s", e)
-                    return 1
-                finally:
-                    conn.close()
-            # JQData 无数据时用东方财富补行业，使 Module A 能拿到有效 industry_name（不直接 return 0）
-            logger.debug("ingest_industry_revenue: no jqdata for symbol=%s, try akshare for industry", symbol)
-        # 优先使用东方财富个股信息（含「行业」），使 Module A 能拿到有效 industry_name；或 JQData 无数据时的回退
-        data = None
-        try:
-            data = _fetch_akshare_individual_info_em(api_symbol)
-        except Exception as e:
-            logger.debug("stock_individual_info_em failed for %s, fallback to financial_abstract: %s", symbol, e)
-        if data is None or not data:
+
+    source = _get_ingest_source()
+
+    # --- JQData 路径 ---
+    if source == "jqdata":
+        data = _fetch_jqdata_financial(api_symbol)
+        if data:
             try:
-                df = _fetch_akshare_financial_abstract(api_symbol)
-                if df is not None and not df.empty:
-                    first = df.iloc[0].to_dict()
-                    for k, v in first.items():
-                        if hasattr(v, "isoformat"):
-                            first[k] = v.isoformat()
-                    data = first
-            except Exception as e:
-                logger.debug("stock_financial_abstract fallback failed for %s: %s", symbol, e)
-        if data is None or not data:
-            # 目标为生产数据：连接失败时不使用静态回退，仅记录并返回 0，由运维解决网络或换数据源
-            logger.warning(
-                "ingest_industry_revenue: no data for symbol=%s（东方财富/JQ 均无数据；若为 RemoteDisconnected 见 docs/ingest-eastmoney-connection.md）",
-                symbol,
-            )
+                for k, v in data.items():
+                    if hasattr(v, "isoformat"):
+                        data[k] = v.isoformat()
+                payload = json.dumps(data, ensure_ascii=False, default=str)
+                file_size = len(payload.encode("utf-8"))
+            except Exception:
+                file_size = 0
+            dsn = get_pg_l2_dsn()
+            conn = psycopg2.connect(dsn)
+            try:
+                write_data_version(conn, data_type=DATA_TYPE, version_id=version_id,
+                                   timestamp=now, file_path=file_path, file_size=file_size, checksum="")
+                try:
+                    iname, rev, rnd, comm = _ensure_industry_and_ratios(symbol, data)
+                    if comm == 0.0:
+                        comm = _estimate_commodity_ratio(iname)
+                    _upsert_industry_revenue_summary(conn, symbol, iname, rev, rnd, comm)
+                except Exception as e:
+                    logger.warning("upsert industry_revenue_summary failed: %s", e)
+                return 1
+            finally:
+                conn.close()
+        logger.debug("ingest_industry_revenue: no jqdata for symbol=%s, try akshare", symbol)
+
+    # --- AkShare 路径 ---
+    # 仅用 fallback CSV 模式（境外/香港无法访问东方财富时启用）
+    if _use_industry_fallback_only():
+        iname = _load_industry_fallback(symbol) or ""
+        if not iname:
+            logger.warning("industry_revenue: FALLBACK_ONLY 但 symbol=%s 无 fallback 匹配", symbol)
             return 0
-        try:
-            for k, v in list(data.items()):
-                if hasattr(v, "isoformat"):
-                    data[k] = v.isoformat()
-            payload = json.dumps(data, ensure_ascii=False, default=str)
-            file_size = len(payload.encode("utf-8"))
-        except Exception:
-            file_size = 0
         dsn = get_pg_l2_dsn()
         conn = psycopg2.connect(dsn)
         try:
-            write_data_version(
-                conn,
-                data_type=DATA_TYPE,
-                version_id=version_id,
-                timestamp=now,
-                file_path=file_path,
-                file_size=file_size,
-                checksum="",
-            )
-            try:
-                iname, rev, rnd, comm = _parse_industry_revenue_row(data)
-                # 采集端补全：API 未返回行业或失败时用 industry_fallback 写入 L2，避免 Module A 读到空而显示「未知」
-                if not (iname or "").strip():
-                    iname = _load_industry_fallback(symbol) or ""
-                    if iname:
-                        logger.debug("industry_revenue: symbol=%s industry_name 由 fallback 补全", symbol)
-                _upsert_industry_revenue_summary(conn, symbol, iname, rev, rnd, comm)
-            except Exception as e:
-                logger.debug("upsert industry_revenue_summary: %s", e)
+            fallback_data = {"行业": iname, "source": "fallback_only"}
+            payload = json.dumps(fallback_data, ensure_ascii=False)
+            write_data_version(conn, data_type=DATA_TYPE, version_id=version_id,
+                               timestamp=now, file_path=file_path,
+                               file_size=len(payload.encode("utf-8")), checksum="")
+            comm = _estimate_commodity_ratio(iname)
+            _upsert_industry_revenue_summary(conn, symbol, iname, 0.0, 0.0, comm)
+            logger.info("industry_revenue: symbol=%s fallback_only → %s", symbol, iname)
             return 1
         finally:
             conn.close()
+
+    # 步骤 1: 东方财富个股信息（行业名）
+    info_data = None
+    try:
+        info_data = _fetch_akshare_individual_info_em(api_symbol)
+    except Exception as e:
+        logger.warning("stock_individual_info_em failed for %s: %s", symbol, e)
+
+    # 步骤 2: 财务分析指标（利润率/费用比重等）
+    fin_data = None
+    try:
+        fin_data = _fetch_akshare_financial_indicator(api_symbol)
+    except Exception as e:
+        logger.debug("stock_financial_analysis_indicator failed for %s: %s", symbol, e)
+
+    # 合并：info_data 提供行业名，fin_data 提供财务指标
+    merged = {}
+    if fin_data:
+        merged.update(fin_data)
+    if info_data:
+        merged.update(info_data)
+
+    # 步骤 3: 都没数据时尝试 financial_abstract 兜底
+    if not merged:
+        try:
+            df = _fetch_akshare_financial_abstract(api_symbol)
+            if df is not None and not df.empty:
+                first = df.iloc[0].to_dict()
+                for k, v in first.items():
+                    if hasattr(v, "isoformat"):
+                        first[k] = v.isoformat()
+                merged = first
+        except Exception as e:
+            logger.debug("stock_financial_abstract fallback failed for %s: %s", symbol, e)
+
+    # 步骤 4: API 全部失败 → 仅用 fallback CSV 保底（确保 Module A 至少有行业名）
+    if not merged:
+        iname = _load_industry_fallback(symbol) or ""
+        if iname:
+            logger.info("industry_revenue: symbol=%s API 全部失败，仅用 fallback → %s", symbol, iname)
+            dsn = get_pg_l2_dsn()
+            conn = psycopg2.connect(dsn)
+            try:
+                fallback_data = {"行业": iname, "source": "fallback_api_failed"}
+                payload = json.dumps(fallback_data, ensure_ascii=False)
+                write_data_version(conn, data_type=DATA_TYPE, version_id=version_id,
+                                   timestamp=now, file_path=file_path,
+                                   file_size=len(payload.encode("utf-8")), checksum="")
+                comm = _estimate_commodity_ratio(iname)
+                _upsert_industry_revenue_summary(conn, symbol, iname, 0.0, 0.0, comm)
+                return 1
+            finally:
+                conn.close()
+        logger.warning(
+            "ingest_industry_revenue: no data for symbol=%s（API 全部失败、fallback 无匹配）",
+            symbol,
+        )
+        return 0
+
+    # 序列化 & 写入
+    try:
+        for k, v in list(merged.items()):
+            if hasattr(v, "isoformat"):
+                merged[k] = v.isoformat()
+        payload = json.dumps(merged, ensure_ascii=False, default=str)
+        file_size = len(payload.encode("utf-8"))
+    except Exception:
+        file_size = 0
+
+    dsn = get_pg_l2_dsn()
+    conn = psycopg2.connect(dsn)
+    try:
+        write_data_version(conn, data_type=DATA_TYPE, version_id=version_id,
+                           timestamp=now, file_path=file_path, file_size=file_size, checksum="")
+        try:
+            iname, rev, rnd, comm = _ensure_industry_and_ratios(symbol, merged)
+            if comm == 0.0:
+                comm = _estimate_commodity_ratio(iname)
+            _upsert_industry_revenue_summary(conn, symbol, iname, rev, rnd, comm)
+        except Exception as e:
+            logger.warning("upsert industry_revenue_summary failed: %s", e)
+        return 1
+    finally:
+        conn.close()
