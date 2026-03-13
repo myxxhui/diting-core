@@ -1,14 +1,23 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier diting prod
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier deps-scanner diting prod run-module-a query-module-a-output init-l2-classifier-table run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table test-scanner
 
 # 采集相关 target 使用的 Python：akshare 要求 >= 3.8，优先 python3.8（若已安装）
 PYTHON_INGEST := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
+# Stage3-02 扫描引擎：TA-Lib 需 Python 3.7+ 且系统已装 ta-lib C 库；优先 python3.8 以使用已安装的 TA-Lib
+PYTHON_SCANNER := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
 
 # 语义分类器单测依赖（无 pip 时用 python3 -m pip）；安装后执行 make test-classifier-cov
 deps-classifier:
 	@python3 -m pip install pytest pytest-cov PyYAML
+
+# Stage3-02 扫描引擎依赖：numpy/PyYAML/psycopg2/TA-Lib；TA-Lib 需先安装系统层 ta-lib C 库（见 02_量化扫描引擎_实践）；含 pytest 供 make test-scanner
+deps-scanner:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && { echo "错误: 未找到 python3.8/python3.9/python3"; exit 1; }; \
+	echo "使用 $$py 安装扫描引擎依赖..."; \
+	cd "$$root" && $$py -m pip install -r requirements-scanner.txt && $$py -m pip install pytest -q && echo "deps-scanner OK（可执行 make run-module-b / make verify-module-b / make test-scanner）"
 
 # Stage2-06 采集依赖（真实行情）：akshare、psycopg2、redis 等；06_ 步骤 3、7、8 执行前须先 make deps-ingest。akshare 要求 Python >= 3.8
 # 先装 akshare --no-deps 再装 core 依赖，避免 akshare 1.18+ 的 curl_cffi>=0.13 与部分环境不兼容
@@ -139,16 +148,74 @@ DITING_ACR_PASSWORD ?= Hui123123
 ACR_IMAGE := $(ACR_REGISTRY)/$(ACR_REPO):latest
 ACR_IMAGE_MODULE_A := $(ACR_REGISTRY)/$(ACR_REPO_MODULE_A):latest
 
-build-images: build-module-a
+build-images: build-module-a build-module-b
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f Dockerfile.ingest -t diting-ingest:test .
-	@echo "build-images: diting-ingest:test + diting-module-a:test OK ($(DOCKER_PLATFORM))"
+	@echo "build-images: diting-ingest:test + diting-module-a:test + diting-module-b:latest OK ($(DOCKER_PLATFORM))"
 
 # Stage3-01 Module A 语义分类器镜像 [Ref: 01_语义分类器_实践, global_const.deployable_units.module_a]
 build-module-a:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f docker/module_a/Dockerfile -t diting-module-a:test .
 	@echo "build-module-a: diting-module-a:test OK ($(DOCKER_PLATFORM))"
+
+# Stage3-02 Module B 量化扫描引擎镜像 [Ref: 02_量化扫描引擎_实践, global_const.deployable_units.module_b]；镜像内含 TA-Lib 系统库与 Python 绑定
+build-module-b:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f docker/module_b/Dockerfile -t diting-module-b:latest .
+	@echo "build-module-b: diting-module-b:latest OK ($(DOCKER_PLATFORM))"
+
+# Stage3-01 一键本地运行 A 模块：加载 .env，执行分类，输出执行标的、执行结果、写入位置 [Ref: 01_语义分类器_实践]
+run-module-a:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/run_module_a_local.py
+
+# Stage3-01 一键查询 A 模块写入的数据：L2 表 classifier_output_snapshot（需 PG_L2_DSN 可达）[Ref: 01_语义分类器_实践]
+query-module-a-output:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/query_classifier_output.py
+
+# Stage3-01 在 L2 库中创建 classifier_output_snapshot 表（若不存在）；L2 可达但报「表可能未创建」时先执行此目标 [Ref: 01_语义分类器_实践]
+init-l2-classifier-table:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_classifier_table.py
+
+# Stage3-02 一键本地运行 B 模块：基于 A 同源标的执行扫描，结果写入 L2 quant_signal_snapshot 供 Module C 使用 [Ref: 02_量化扫描引擎_实践]（需先 make deps-scanner）
+run-module-b:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/run_module_b_local.py
+
+# Stage3-02 一键查询 B 模块写入的数据：L2 表 quant_signal_snapshot（需 PG_L2_DSN 可达）[Ref: 02_量化扫描引擎_实践]
+query-module-b-output:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/query_scanner_output.py
+
+# Stage3-02 B 模块功能验证：基于 A 同源标的跑扫描，校验输出格式与 L2 写入、是否符合预期 [Ref: 02_量化扫描引擎_实践]
+verify-module-b:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/run_scanner_functional_verify.py
+
+# Stage3-02 在 L2 库中创建 quant_signal_snapshot 表（若不存在）；L2 可达但报「表可能未创建」时先执行此目标 [Ref: 02_量化扫描引擎_实践]
+init-l2-quant-signal-table:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/init_l2_quant_signal_table.py
+
+# Stage3-02 扫描引擎单测 [Ref: 02_量化扫描引擎_实践]
+test-scanner:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py -m pytest tests/unit/test_scanner.py -v --tb=short
 
 # 构建并推送到 ACR（密码取 Makefile 中 DITING_ACR_PASSWORD 或环境变量）
 push-images: build-images

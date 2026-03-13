@@ -1,0 +1,5 @@
+# 标的中文名（可选）：复制为 symbol_names.csv 后按需填写，每行 symbol,name_cn
+# 不配置时运行会通过 akshare 自动补全；本文件仅作格式示例
+symbol,name_cn
+688331.SH,宏华数科
+002261.SZ,拓维信息

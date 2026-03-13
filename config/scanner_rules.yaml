@@ -1,0 +1,26 @@
+# [Ref: 02_量化扫描引擎_实践] [Ref: dna_module_b] Module B 策略池与扫描阈值，禁止硬编码
+# 与 03_原子目标与规约/Stage3_模块实践/02_量化扫描引擎_策略实现规约.md 对齐
+
+module_b_quant_engine:
+  strategy_pools:
+    pool_1_trend:
+      name: "趋势策略"
+      conditions:
+        - "均线多头排列：MA5 > MA10 > MA20"
+        - "MACD 水上金叉：MACD > 0 且 DIF > DEA"
+      score_range: [0, 100]
+    pool_2_reversion:
+      name: "反转策略"
+      conditions:
+        - "RSI(14) < 30（超卖）"
+        - "价格触及 Bollinger 下轨"
+      score_range: [0, 100]
+    pool_3_breakout:
+      name: "突破策略"
+      conditions:
+        - "收盘价 > 20 日最高（前一日）"
+        - "成交量 > 2×SMA(volume, 20)"
+      score_range: [0, 100]
+  scanner:
+    technical_score_threshold: 70
+    sector_strength_threshold: 1.0

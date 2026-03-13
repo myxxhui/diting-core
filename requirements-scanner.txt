@@ -1,0 +1,7 @@
+# Module B 量化扫描引擎运行时依赖 [Ref: 02_量化扫描引擎_实践]
+# TA-Lib 需先安装系统层 ta-lib C 库，再 pip install TA-Lib（见设计文档依赖与构建）
+numpy>=1.20.0
+PyYAML>=6.0
+psycopg2-binary>=2.9.0
+# 技术指标 100% 基于 TA-Lib。系统层 C 库为 0.4.x 时请用 TA-Lib==0.4.28（0.6.x 需 C 库 0.6.x，否则会 undefined symbol）
+TA-Lib>=0.4.28,<0.5

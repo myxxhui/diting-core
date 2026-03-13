@@ -1,11 +1,12 @@
 # [Ref: 01_语义分类器] [Ref: 09_核心模块架构规约] Module A 运行入口
 # 供 Docker/K8s 部署：从环境变量读取 TIMESCALE_DSN、PG_L2_DSN，执行全量分类（run_full）
 # 可选 RUN_LOOP=1 时每 24h 执行一次，供长期运行 Deployment
-# 执行结果当前仅输出到 stdout（kubectl logs）；若需 Module B 在独立部署时消费，需将结果写入 L2 表或共享存储（待实现）
+# 分类完成后将 ClassifierOutput 写入 L2 表 classifier_output_snapshot，供 Module B 按约定读取
 
 import logging
 import os
 import time
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,18 +29,45 @@ def _load_env() -> None:
                         os.environ[k] = v
 
 
+def _default_universe_from_diting_symbols():
+    """默认按 config/diting_symbols.txt 全部标的（与采集模块一致）。"""
+    from pathlib import Path
+    root = Path(os.environ.get("DITING_CORE_ROOT", "."))
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    path = root / "config" / "diting_symbols.txt"
+    if not path.exists():
+        return None
+    from diting.universe import normalize_symbol
+    symbols = []
+    seen = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip().split("#")[0].strip()
+            if line:
+                sym = normalize_symbol(line)
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    symbols.append(sym)
+    return symbols if symbols else None
+
+
 def run_once() -> int:
-    """执行一次分类：支持 MODULE_AB_SYMBOLS 指定股票，否则 get_current_a_share_universe() 全量。"""
+    """执行一次分类：默认按 config/diting_symbols.txt 全部标的（与采集模块一致）；也可由 DITING_SYMBOLS/MODULE_AB_SYMBOLS 指定。"""
     _load_env()
     from diting.classifier import SemanticClassifier
     from diting.universe import get_current_a_share_universe, parse_symbol_list_from_env
 
-    # 与采集共用一套指定股票：DITING_SYMBOLS；未设置时再读 MODULE_AB_SYMBOLS
+    # 与采集模块一致：优先 DITING_SYMBOLS / MODULE_AB_SYMBOLS；未设置时默认 config/diting_symbols.txt 全部标的
     symbols_env_set = bool((os.environ.get("DITING_SYMBOLS") or "").strip() or (os.environ.get("MODULE_AB_SYMBOLS") or "").strip())
     universe = parse_symbol_list_from_env("DITING_SYMBOLS") or parse_symbol_list_from_env("MODULE_AB_SYMBOLS")
+    if not universe and not symbols_env_set:
+        universe = _default_universe_from_diting_symbols()
+        if universe:
+            logger.info("默认标的：config/diting_symbols.txt 共 %s 只（与采集模块一致）", len(universe))
     if universe:
-        logger.info("指定股票模式：本批共 %s 只（来源：DITING_SYMBOLS / MODULE_AB_SYMBOLS）", len(universe))
-        # 输出本批执行标的（前 10 只 + 省略），便于核对
+        if symbols_env_set:
+            logger.info("指定股票模式：本批共 %s 只（来源：DITING_SYMBOLS / MODULE_AB_SYMBOLS）", len(universe))
         show = universe[:10]
         if len(universe) > 10:
             logger.info("本批执行标的：%s ... 等共 %s 只", "、".join(show), len(universe))
@@ -58,12 +86,12 @@ def run_once() -> int:
                 try:
                     universe = get_current_a_share_universe()
                 except Exception as e:
-                    logger.warning("从库获取全 A 股标的失败，使用空列表或标样: %s", e)
+                    logger.warning("从库获取全 A 股标的失败: %s", e)
             if not universe:
                 universe = ["000998.SZ", "688981.SH", "601899.SH", "999999.SZ"]
-                logger.info("使用标样标的列表: %s", universe)
+                logger.info("未找到 config/diting_symbols.txt 且无法读 L1，使用 fallback 标样: %s", universe)
             if universe:
-                logger.info("本批执行标的：来自 L1 全量或标样，共 %s 只", len(universe))
+                logger.info("本批执行标的：共 %s 只", len(universe))
 
     # 有 L2 时对每只标的从 L2 查行业/营收（一次批量查库）；L2 行业名为空时用 config/industry_fallback.csv 补全，使 Module A 能输出非「未知」
     industry_provider = None
@@ -88,11 +116,29 @@ def run_once() -> int:
         except Exception as e:
             logger.warning("L2 行业数据未启用，回退 Mock: %s", e)
 
+    batch_id = str(uuid.uuid4())
     results = SemanticClassifier.run_full(
         universe=universe,
+        correlation_id=batch_id,
         industry_revenue_provider=industry_provider,
     )
     logger.info("语义分类器本批完成：执行 %s 只，输出 %s 条", len(universe), len(results))
+
+    # [Ref: 01_语义分类器_实践 F9] ClassifierOutput 写入 L2 表 classifier_output_snapshot，供 Module B 按 batch_id 读取
+    if results and os.environ.get("PG_L2_DSN"):
+        try:
+            from diting.classifier.l2_snapshot_writer import write_classifier_output_snapshot
+            n = write_classifier_output_snapshot(
+                os.environ["PG_L2_DSN"],
+                results,
+                batch_id=batch_id,
+                correlation_id=batch_id,
+            )
+            if n:
+                logger.info("本批分类结果已写入 L2 classifier_output_snapshot，batch_id=%s，行数=%s", batch_id, n)
+        except Exception as e:
+            logger.warning("写入 L2 classifier_output_snapshot 失败: %s", e)
+
     # 分类结果摘要：每条约 symbol -> 领域标签（中文名）+ 置信度
     for out in results[:10]:
         tag_strs = []
