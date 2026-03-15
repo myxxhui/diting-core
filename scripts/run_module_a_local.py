@@ -24,7 +24,7 @@ if _env.exists():
                 if k and os.environ.get(k) is None:
                     os.environ[k] = v
 
-_DOMAIN_TAG_NAMES = {0: "未指定", 1: "农业", 2: "科技", 3: "周期", 4: "未知", 5: ""}
+_DOMAIN_TAG_NAMES = {0: "未指定", 1: "农业", 2: "科技", 3: "宏观", 4: "未知", 5: ""}
 
 
 def main():

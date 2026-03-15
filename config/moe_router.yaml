@@ -1,0 +1,17 @@
+# [Ref: 04_A轨_MoE议会_设计, dna_module_c] 按股配置 + 统一分析；supported_tags 与策略参数
+moe_router:
+  supported_tags: ["农业", "科技", "宏观"]
+  risk_factor_templates:
+    农业: ["政策兑现风险", "存栏供给波动", "气候异常"]
+    科技: ["研发不及预期", "技术路线替代", "大基金减持"]
+    宏观: ["汇率波动", "供需反转"]
+  alignment:
+    primary_weight: 0.6
+    other_weight: 0.4
+    veto_threshold: 0.3
+  multi_segment:
+    primary_veto: true
+    risk_discount: 0.5
+  signal_parse:
+    fallback_keywords_bullish: ["利好", "上涨", "支持", "政策"]
+    fallback_keywords_bearish: ["利空", "下跌", "风险"]

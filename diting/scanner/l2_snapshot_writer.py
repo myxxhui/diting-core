@@ -7,12 +7,13 @@ from typing import Any, List
 
 logger = logging.getLogger(__name__)
 
-# StrategyPool 枚举名，与 QuantSignal.proto 一致；L2 表 strategy_source VARCHAR(16)
+# StrategyPool 枚举名，与 02 规约 §4、QuantSignal 契约一致；L2 表 strategy_source VARCHAR(16)
 _STRATEGY_NAMES = {
     0: "UNSPECIFIED",
     1: "TREND",
     2: "REVERSION",
     3: "BREAKOUT",
+    4: "MOMENTUM",
 }
 
 
@@ -24,8 +25,21 @@ def _get_attr(obj: Any, key: str, default: Any = None) -> Any:
     return default
 
 
+def _pool_scores(signal: Any) -> tuple:
+    """从 signal 的 pool_scores 取出 趋势/反转/突破/动量 得分，池 id 1/2/3/4。"""
+    ps = _get_attr(signal, "pool_scores") or {}
+    if not isinstance(ps, dict):
+        return (0.0, 0.0, 0.0, 0.0)
+    return (
+        float(ps.get(1, 0)),
+        float(ps.get(2, 0)),
+        float(ps.get(3, 0)),
+        float(ps.get(4, 0)),
+    )
+
+
 def _signal_to_row(signal: Any, batch_id: str, correlation_id: str) -> tuple:
-    """将单条 QuantSignal 转为 quant_signal_snapshot 行（含 symbol_name）。"""
+    """将单条 QuantSignal 转为 quant_signal_snapshot 行（含 symbol_name、各池得分、截面分位）。"""
     symbol = str(_get_attr(signal, "symbol") or "")[:32]
     symbol_name = str(_get_attr(signal, "symbol_name") or "")[:128]
     technical_score = float(_get_attr(signal, "technical_score") or 0)
@@ -35,15 +49,24 @@ def _signal_to_row(signal: Any, batch_id: str, correlation_id: str) -> tuple:
     else:
         strategy_source = str(strategy_source or "UNSPECIFIED")[:16]
     sector_strength = float(_get_attr(signal, "sector_strength") or 0)
+    trend_score, reversion_score, breakout_score, momentum_score = _pool_scores(signal)
     corr = str(_get_attr(signal, "correlation_id") or correlation_id)[:64]
-    return (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, corr)
+    pct = _get_attr(signal, "technical_score_percentile")
+    score_percentile = float(pct) if pct is not None else None
+    lt_score = _get_attr(signal, "long_term_score")
+    long_term_score = float(lt_score) if lt_score is not None else None
+    long_term_candidate = bool(_get_attr(signal, "long_term_candidate", False))
+    return (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength,
+            trend_score, reversion_score, breakout_score, momentum_score, score_percentile,
+            long_term_score, long_term_candidate, corr)
 
 
 def _signal_to_scan_all_row(signal: Any, batch_id: str, correlation_id: str) -> tuple:
-    """将单条 QuantSignal 转为 quant_signal_scan_all 行（含 symbol_name；列顺序: ..., sector_strength, passed, correlation_id）。"""
+    """将单条 QuantSignal 转为 quant_signal_scan_all 行（含 symbol_name、各池得分、截面分位、passed、B轨 long_term）。"""
     base = _signal_to_row(signal, batch_id, correlation_id)
     passed = bool(_get_attr(signal, "passed", False))
-    return base[:6] + (passed,) + (base[6],)
+    # base = (..., long_term_score, long_term_candidate, corr) -> scan_all 在 passed 位置插入
+    return base[:-3] + (passed,) + base[-3:]
 
 
 def write_quant_signal_snapshot(
@@ -78,8 +101,8 @@ def write_quant_signal_snapshot(
             cur.executemany(
                 """
                 INSERT INTO quant_signal_snapshot
-                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, correlation_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, long_term_score, long_term_candidate, correlation_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 rows,
             )
@@ -125,8 +148,8 @@ def write_quant_signal_scan_all(
             cur.executemany(
                 """
                 INSERT INTO quant_signal_scan_all
-                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, passed, correlation_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, passed, long_term_score, long_term_candidate, correlation_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 rows,
             )

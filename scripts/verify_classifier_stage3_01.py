@@ -61,7 +61,7 @@ def main():
         for t in out.tags:
             tag_val = getattr(t, "domain_tag", 4)
             label = getattr(t, "domain_label", None) or ""
-            name = {"0": "UNSPECIFIED", "1": "AGRI", "2": "TECH", "3": "GEO", "4": "UNKNOWN", "5": "CUSTOM"}.get(
+            name = {"0": "未指定", "1": "农业", "2": "科技", "3": "宏观", "4": "未知", "5": "自定义"}.get(
                 str(tag_val), str(tag_val)
             )
             if tag_val == 5 and label:

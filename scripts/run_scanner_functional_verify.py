@@ -22,6 +22,9 @@ if _env.exists():
                 k, v = k.strip(), v.strip().strip('"').strip("'")
                 if k and os.environ.get(k) is None:
                     os.environ[k] = v
+# 无库验证：VERIFY_USE_MOCK_OHLCV=1 时强制不使用 L1，使 scan_market 使用 Mock OHLCV 跑通
+if os.environ.get("VERIFY_USE_MOCK_OHLCV"):
+    os.environ["TIMESCALE_DSN"] = ""
 
 
 def _default_universe_from_diting_symbols():
@@ -55,9 +58,15 @@ def main():
         print("FAIL: 未获取到标的列表（请配置 DITING_SYMBOLS 或保证 config/diting_symbols.txt 存在且非空）")
         sys.exit(1)
 
-    from diting.scanner.symbol_names import load_symbol_names, fill_names_from_akshare
-    symbol_to_name = load_symbol_names(root=Path(ROOT))
-    fill_names_from_akshare(symbol_to_name, list(universe))
+    from diting.scanner.symbol_names import get_symbol_names
+    dsn_l2 = (os.environ.get("PG_L2_DSN") or "").strip() or None
+    skip_akshare = bool(os.environ.get("VERIFY_MODULE_B_SKIP_AKSHARE"))
+    symbol_to_name = get_symbol_names(
+        list(universe),
+        dsn=dsn_l2,
+        root=Path(ROOT),
+        skip_akshare=skip_akshare,
+    )
 
     ohlcv_dsn = (os.environ.get("TIMESCALE_DSN") or "").strip() or None
     scanner = QuantScanner()
@@ -80,6 +89,8 @@ def main():
     l2_snapshot_written = 0
     l2_scan_all_written = 0
     dsn = (os.environ.get("PG_L2_DSN") or "").strip()
+    if os.environ.get("VERIFY_USE_MOCK_OHLCV"):
+        dsn = ""  # 无库验证模式不连 L2，避免连接超时
     if signals and dsn:
         try:
             l2_scan_all_written = write_quant_signal_scan_all(dsn, signals, batch_id="verify-batch-b", correlation_id="verify-batch-b")

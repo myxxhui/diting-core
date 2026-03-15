@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier deps-scanner diting prod run-module-a query-module-a-output init-l2-classifier-table run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table test-scanner
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier deps-scanner diting prod run-module-a query-module-a-output init-l2-classifier-table run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table init-l2-symbol-names-table test-scanner
 
 # 采集相关 target 使用的 Python：akshare 要求 >= 3.8，优先 python3.8（若已安装）
 PYTHON_INGEST := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
@@ -184,9 +184,11 @@ init-l2-classifier-table:
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_classifier_table.py
 
 # Stage3-02 一键本地运行 B 模块：基于 A 同源标的执行扫描，结果写入 L2 quant_signal_snapshot 供 Module C 使用 [Ref: 02_量化扫描引擎_实践]（需先 make deps-scanner）
+# macOS：Homebrew 安装的 ta-lib 为 libta-lib.dylib，Python 包需 libta_lib；若存在 .ta_lib_link 则加入 DYLD_LIBRARY_PATH
 run-module-b:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	[ -d "$$root/.ta_lib_link" ] && export DYLD_LIBRARY_PATH="$$root/.ta_lib_link:/opt/homebrew/opt/ta-lib/lib:$${DYLD_LIBRARY_PATH:-}"; true; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
 	cd "$$root" && PYTHONPATH="$$root" $$py scripts/run_module_b_local.py
 
@@ -198,9 +200,11 @@ query-module-b-output:
 	cd "$$root" && PYTHONPATH="$$root" $$py scripts/query_scanner_output.py
 
 # Stage3-02 B 模块功能验证：基于 A 同源标的跑扫描，校验输出格式与 L2 写入、是否符合预期 [Ref: 02_量化扫描引擎_实践]
+# B 模块功能验证：默认用 Mock OHLCV 与跳过 akshare 补全，保证无库/无外网时可跑通；需真实 L1 时取消下一行注释并设 TIMESCALE_DSN
 verify-module-b:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	export VERIFY_USE_MOCK_OHLCV=1 VERIFY_MODULE_B_SKIP_AKSHARE=1; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
 	cd "$$root" && PYTHONPATH="$$root" $$py scripts/run_scanner_functional_verify.py
 
@@ -210,6 +214,13 @@ init-l2-quant-signal-table:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
 	cd "$$root" && PYTHONPATH="$$root" $$py scripts/init_l2_quant_signal_table.py
+
+# Stage3-02 在 L2 库中创建 symbol_names 表（标的中文名持久化）；优先从该表读，缺失时 akshare 拉取并落库
+init-l2-symbol-names-table:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/init_l2_symbol_names_table.py
 
 # Stage3-02 扫描引擎单测 [Ref: 02_量化扫描引擎_实践]
 test-scanner:

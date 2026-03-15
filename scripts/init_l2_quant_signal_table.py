@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS quant_signal_snapshot (
     technical_score    DOUBLE PRECISION NOT NULL DEFAULT 0,
     strategy_source    VARCHAR(16)  NOT NULL DEFAULT 'UNSPECIFIED',
     sector_strength    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    trend_score        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    reversion_score    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    breakout_score     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    momentum_score     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    technical_score_percentile DOUBLE PRECISION,
     correlation_id     VARCHAR(64)  NOT NULL DEFAULT '',
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
@@ -47,6 +52,11 @@ CREATE TABLE IF NOT EXISTS quant_signal_scan_all (
     technical_score    DOUBLE PRECISION NOT NULL DEFAULT 0,
     strategy_source    VARCHAR(16)  NOT NULL DEFAULT 'UNSPECIFIED',
     sector_strength    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    trend_score        DOUBLE PRECISION NOT NULL DEFAULT 0,
+    reversion_score    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    breakout_score     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    momentum_score     DOUBLE PRECISION NOT NULL DEFAULT 0,
+    technical_score_percentile DOUBLE PRECISION,
     passed             BOOLEAN       NOT NULL DEFAULT FALSE,
     correlation_id     VARCHAR(64)  NOT NULL DEFAULT '',
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -57,10 +67,24 @@ CREATE INDEX IF NOT EXISTS idx_quant_signal_scan_all_passed ON quant_signal_scan
 CREATE INDEX IF NOT EXISTS idx_quant_signal_scan_all_created ON quant_signal_scan_all(created_at DESC);
 """
 
-# 已有表补列 symbol_name（PostgreSQL 9.5+）
-ALTER_SYMBOL_NAME = """
+# 已有表补列 symbol_name、各池得分（PostgreSQL 9.5+）
+ALTER_EXTRA = """
 ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS symbol_name VARCHAR(128) NOT NULL DEFAULT '';
 ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS symbol_name VARCHAR(128) NOT NULL DEFAULT '';
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS trend_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS reversion_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS breakout_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS momentum_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS trend_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS reversion_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS breakout_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS momentum_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS technical_score_percentile DOUBLE PRECISION;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS technical_score_percentile DOUBLE PRECISION;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS long_term_score DOUBLE PRECISION;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS long_term_candidate BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS long_term_score DOUBLE PRECISION;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS long_term_candidate BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 
@@ -82,7 +106,7 @@ def main():
             stmt = stmt.strip()
             if stmt:
                 cur.execute(stmt)
-        for stmt in ALTER_SYMBOL_NAME.strip().split(";"):
+        for stmt in ALTER_EXTRA.strip().split(";"):
             stmt = stmt.strip()
             if stmt:
                 try:

@@ -1,11 +1,11 @@
 # [Ref: 01_语义分类器] [Ref: dna_module_a.classification_rules]
 # 分类规则由 YAML 驱动；categories 按顺序匹配，先匹配先采用。
-# id 为 agri/tech/geo 时对应 DomainTag 枚举，其余为自定义 DOMAIN_CUSTOM + label。
+# id 为 农业/科技/宏观 时对应 DomainTag 枚举（存储与展示均用中文），其余为自定义 + label。
 # industry_keywords 为子串匹配（"电子" 命中 "消费电子"），覆盖申万一级+二级行业。
 
 categories:
-  # ===== 三大核心域 =====
-  - id: agri
+  # ===== 三大核心域（领域值以中文为主，与 DB primary_tag、过滤展示一致）=====
+  - id: 农业
     label: 农业
     industry_keywords:
       - 农林牧渔
@@ -18,7 +18,7 @@ categories:
     # revenue_ratio 实际存储的是"毛利率"而非"主营营收占比"，
     # 高毛利行业（医疗器械 60%、化妆品 80%）会误触发，因此不设阈值。
 
-  - id: tech
+  - id: 科技
     label: 科技
     industry_keywords:
       - 电子
@@ -34,8 +34,8 @@ categories:
     # 注意：rnd_ratio 字段实际存储的是"三费占比"而非研发投入占比，
     # 因此不再用 rnd_ratio_threshold 做判定，纯靠行业关键词。
 
-  - id: geo
-    label: 周期
+  - id: 宏观
+    label: 宏观
     industry_keywords:
       - 有色金属
       - 石油石化

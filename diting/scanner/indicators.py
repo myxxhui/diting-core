@@ -104,3 +104,47 @@ def sma_volume(volume: Any, period: int = 20) -> Optional[List[float]]:
         return None
     out = talib.SMA(v, timeperiod=period)
     return list(out) if out is not None else None
+
+
+def atr(high: Any, low: Any, close: Any, period: int = 14) -> Optional[List[float]]:
+    """ATR(high, low, close, period)。用于波动率 regime。"""
+    if not _HAS_TALIB:
+        return None
+    h, l, c = _to_array(high), _to_array(low), _to_array(close)
+    if len(h) < period or len(l) < period or len(c) < period:
+        return None
+    out = talib.ATR(h, l, c, timeperiod=period)
+    return list(out) if out is not None else None
+
+
+def min_close(close: Any, period: int) -> Optional[List[float]]:
+    """N 日收盘价最低。TA-Lib: MIN(close, timeperiod)。用于 60 日高低区间。"""
+    if not _HAS_TALIB:
+        return None
+    c = _to_array(close)
+    if len(c) < period:
+        return None
+    out = talib.MIN(c, timeperiod=period)
+    return list(out) if out is not None else None
+
+
+def min_low(low: Any, period: int) -> Optional[List[float]]:
+    """N 日最低价最低。TA-Lib: MIN(low, timeperiod)。用于 60 日区间分母。"""
+    if not _HAS_TALIB:
+        return None
+    l = _to_array(low)
+    if len(l) < period:
+        return None
+    out = talib.MIN(l, timeperiod=period)
+    return list(out) if out is not None else None
+
+
+def adx(high: Any, low: Any, close: Any, period: int = 14) -> Optional[List[float]]:
+    """ADX(high, low, close, period)。趋势强度，用于趋势池过滤弱趋势。"""
+    if not _HAS_TALIB:
+        return None
+    h, l, c = _to_array(high), _to_array(low), _to_array(close)
+    if len(h) < period or len(l) < period or len(c) < period:
+        return None
+    out = talib.ADX(h, l, c, timeperiod=period)
+    return list(out) if out is not None else None

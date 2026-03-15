@@ -11,8 +11,8 @@ import uuid
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# DomainTag 枚举到中文名，便于日志可读；5=DOMAIN_CUSTOM 时以 tag.domain_label 为准
-_DOMAIN_TAG_NAMES = {0: "未指定", 1: "农业", 2: "科技", 3: "周期", 4: "未知", 5: ""}
+# DomainTag 枚举到展示名（与 L2 primary_tag、过滤展示一致，以中文为主）
+_DOMAIN_TAG_NAMES = {0: "未指定", 1: "农业", 2: "科技", 3: "宏观", 4: "未知", 5: ""}
 
 
 def _load_env() -> None:

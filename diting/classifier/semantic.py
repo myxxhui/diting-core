@@ -14,8 +14,11 @@ from diting.protocols.classifier_pb2 import (
     TagWithConfidence,
 )
 
-# 规则键 -> DomainTag（仅 agri/tech/geo 使用枚举，其余用 DOMAIN_CUSTOM + label）
-_DOMAIN_TAG_BY_ID = {"agri": DomainTag.AGRI, "tech": DomainTag.TECH, "geo": DomainTag.GEO}
+# 规则键 -> DomainTag（农业/科技/宏观 或 兼容 agri/tech/geo，其余用 DOMAIN_CUSTOM + label）
+_DOMAIN_TAG_BY_ID = {
+    "农业": DomainTag.AGRI, "科技": DomainTag.TECH, "宏观": DomainTag.GEO,
+    "agri": DomainTag.AGRI, "tech": DomainTag.TECH, "geo": DomainTag.GEO,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +85,14 @@ class SemanticClassifier:
         industry, revenue_ratio, rnd_ratio, commodity_ratio = self._provider(symbol)
         tags_with_conf: List[TagWithConfidence] = []
         categories = self._rules.get("categories") or []
-        # 兼容旧版 YAML：仅有 agri/tech/geo 时按原逻辑
-        if not categories and (self._rules.get("agri") or self._rules.get("tech") or self._rules.get("geo")):
+        # 兼容旧版 YAML：仅有 农业/科技/宏观 或 agri/tech/geo 时按原逻辑
+        if not categories and (self._rules.get("农业") or self._rules.get("agri") or self._rules.get("科技") or self._rules.get("tech") or self._rules.get("宏观") or self._rules.get("geo")):
             tags_with_conf = self._classify_legacy(industry, revenue_ratio, rnd_ratio, commodity_ratio)
         else:
             confidence_matched = 0.95
             for cat in categories:
-                cat_id = (cat.get("id") or "").strip().lower()
+                raw_id = (cat.get("id") or "").strip()
+                cat_id = raw_id.lower() if raw_id.isascii() else raw_id  # 中文 id 不转小写
                 label = (cat.get("label") or cat.get("id") or "").strip() or cat_id
                 keywords = cat.get("industry_keywords") or []
                 keyword_match = any(k in industry for k in keywords)

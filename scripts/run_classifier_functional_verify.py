@@ -74,7 +74,7 @@ def main():
             if tag_val == 5 and label:
                 tag_names.add(label)
             else:
-                for name, val in [("AGRI", 1), ("TECH", 2), ("GEO", 3), ("UNKNOWN", 4)]:
+                for name, val in [("农业", 1), ("科技", 2), ("宏观", 3), ("未知", 4)]:
                     if tag_val == val:
                         tag_names.add(name)
                         break

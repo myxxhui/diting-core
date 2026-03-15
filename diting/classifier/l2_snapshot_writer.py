@@ -8,20 +8,20 @@ from typing import Any, List
 
 logger = logging.getLogger(__name__)
 
-# DomainTag 枚举值 -> primary_tag 字符串（与 L2 表 primary_tag 约定一致）
+# DomainTag 枚举值 -> primary_tag 字符串（与 L2 表 primary_tag 约定一致；以中文为主便于理解与过滤）
 _DOMAIN_TAG_TO_STR = {
-    0: "UNSPECIFIED",
-    1: "AGRI",
-    2: "TECH",
-    3: "GEO",
-    4: "UNKNOWN",
-    5: "CUSTOM",
+    0: "未指定",
+    1: "农业",
+    2: "科技",
+    3: "宏观",
+    4: "未知",
+    5: "自定义",
 }
 
 
 def _output_to_row(output: Any, batch_id: str, correlation_id: str) -> tuple:
     """将单条 ClassifierOutput 转为 (batch_id, symbol, primary_tag, primary_confidence, tags_json, correlation_id)."""
-    primary_tag = "UNKNOWN"
+    primary_tag = "未知"
     primary_confidence = 0.0
     tags_list = []
     if getattr(output, "tags", None):
@@ -33,9 +33,9 @@ def _output_to_row(output: Any, batch_id: str, correlation_id: str) -> tuple:
         if tags_list:
             t0 = tags_list[0]
             tag_val = t0["domain_tag"]
-            primary_tag = _DOMAIN_TAG_TO_STR.get(tag_val, "UNKNOWN")
+            primary_tag = _DOMAIN_TAG_TO_STR.get(tag_val, "未知")
             if tag_val == 5 and t0.get("domain_label"):
-                primary_tag = (t0["domain_label"] or "")[:16] or "CUSTOM"
+                primary_tag = (t0["domain_label"] or "")[:16] or "自定义"
             primary_confidence = t0.get("confidence", 0.0)
     tags_json = json.dumps(tags_list, ensure_ascii=False) if tags_list else None
     symbol = getattr(output, "symbol", "") or ""

@@ -3,13 +3,14 @@
 # 正式流程：design/protocols/classifier/classifier_output.proto -> protoc -> 本模块
 
 class DomainTag:
-    """DomainTag enum: 与 ClassifierOutput.proto 一致，供 Module B/D 消费。"""
-    DOMAIN_UNSPECIFIED = 0
-    AGRI = 1
-    TECH = 2
-    GEO = 3
-    UNKNOWN = 4
-    DOMAIN_CUSTOM = 5  # 自定义类别，展示名由 domain_label 提供
+    """DomainTag enum: 与 ClassifierOutput.proto 一致，供 Module B/D 消费。
+    存储与展示以中文为主：1=农业 2=科技 3=宏观 4=未知 5=自定义（见 l2_snapshot_writer._DOMAIN_TAG_TO_STR）。"""
+    DOMAIN_UNSPECIFIED = 0  # 未指定
+    AGRI = 1   # 农业
+    TECH = 2   # 科技
+    GEO = 3    # 宏观
+    UNKNOWN = 4  # 未知
+    DOMAIN_CUSTOM = 5  # 自定义，展示名由 domain_label 提供
 
 
 class TagWithConfidence:

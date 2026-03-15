@@ -46,7 +46,8 @@ def _fetch_l1_ohlcv(
         import psycopg2
     except ImportError:
         return None
-    conn = psycopg2.connect(dsn)
+    # 连接超时 15 秒，避免远程不可达时长时间挂起
+    conn = psycopg2.connect(dsn, connect_timeout=15)
     try:
         cur = conn.cursor()
         # 按时间升序，取最近 limit 条（子查询先 DESC 取 limit 再 ORDER BY datetime ASC）

@@ -3,3 +3,5 @@
 .env.ingest.local
 # make ingest-production 断点续跑进度（06_ 最佳分批模式）
 .ingest_production_progress
+# macOS Homebrew ta-lib 与 Python TA-Lib 库名不一致时的本地符号链接目录（勿提交）
+.ta_lib_link

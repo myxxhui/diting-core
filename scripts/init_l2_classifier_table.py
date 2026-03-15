@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS classifier_output_snapshot (
     id                BIGSERIAL PRIMARY KEY,
     batch_id           VARCHAR(64)  NOT NULL,
     symbol             VARCHAR(32)  NOT NULL,
-    primary_tag        VARCHAR(16)  NOT NULL DEFAULT 'UNKNOWN',
+    primary_tag        VARCHAR(16)  NOT NULL DEFAULT '未知',
     primary_confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
     tags_json          JSONB,
     correlation_id     VARCHAR(64)  NOT NULL DEFAULT '',

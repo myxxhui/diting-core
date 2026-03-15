@@ -1,26 +1,115 @@
-# [Ref: 02_量化扫描引擎_实践] [Ref: dna_module_b] Module B 策略池与扫描阈值，禁止硬编码
-# 与 03_原子目标与规约/Stage3_模块实践/02_量化扫描引擎_策略实现规约.md 对齐
+# [Ref: 02_B模块策略_策略实现规约] Module B 策略池、连续打分、优化项；生产默认全部开启
+# 与 03_原子目标与规约/Stage3_模块实践/02_B模块策略_策略实现规约.md 对齐
+#
+# ---------- scanner 节点变量说明（module_b_quant_engine.scanner）----------
+# technical_score_threshold   int    总分通过阈值，≥ 该值且满足其余条件则 passed；默认 70
+# sector_strength_threshold   float  板块强度通过阈值；默认 1.0，无板块数据时 sector_strength=1.0 恒过
+# pass_require_lead_pool_min  number | null  可选收紧·主池下限。未设置(null)则不约束；设为数字(如 85)时，
+#                                   通过条件增加「最高池得分 ≥ 该值」，用于将来权重/阈值改动时的保险
+# pass_require_second_pool_min number | null  可选收紧·次池下限。未设置(null)则不约束；设为数字(如 25)时，
+#                                    通过条件增加「次高池得分 ≥ 该值」，排除「单池满分、其余 0」的通过
+#                                    详见 02_B模块通过组合与设计符合度分析.md §五
+# -------------------------------------------------------------------------
 
 module_b_quant_engine:
   strategy_pools:
     pool_1_trend:
       name: "趋势策略"
       conditions:
-        - "均线多头排列：MA5 > MA10 > MA20"
-        - "MACD 水上金叉：MACD > 0 且 DIF > DEA"
+        - "均线多头排列：MA5 > MA10 > MA20 > MA60"
+        - "MACD 水上金叉：DIF > 0 且 DIF > DEA"
       score_range: [0, 100]
     pool_2_reversion:
       name: "反转策略"
       conditions:
-        - "RSI(14) < 30（超卖）"
-        - "价格触及 Bollinger 下轨"
+        - "RSI(14) 超卖区间 [20,35] 连续子分；触及 Bollinger 下轨；止跌 close > MA5"
       score_range: [0, 100]
     pool_3_breakout:
       name: "突破策略"
       conditions:
-        - "收盘价 > 20 日最高（前一日）"
-        - "成交量 > 2×SMA(volume, 20)"
+        - "收盘价 > 前 20 日最高；突破幅度按 ATR 归一化"
+        - "成交量 > 2×SMA(volume, 20)，量比 cap 5.0"
       score_range: [0, 100]
+    pool_4_momentum:
+      name: "动量策略"
+      conditions:
+        - "20 日收益率分位 ≥ 0.80"
+        - "close > MA20"
+      score_range: [0, 100]
+  scoring:
+    trend:
+      macd_hist_scale_ratio: 0.01
+    reversion:
+      rsi_oversold: 20
+      rsi_soft_ceiling: 35
+    breakout:
+      price_scale_ratio: 0.02
+      volume_cap_multiple: 5.0
+      atr_scale_enabled: true
+      min_atr_multiple: 0.5
+  optimization:
+    trend_confirm_bars: 3
+    breakout_confirm_bars: 2
+    reversion_require_above_ma5: true
+    multi_pool_min_score: 40
+    multi_pool_bonus: 10
+    # 趋势：ADX 弱趋势降权（默认开启）
+    trend_adx_enabled: true
+    trend_adx_min: 25
+    trend_adx_penalty_ratio: 0.6
+    # 趋势：部分确认给分（2/3 根满足 ×0.7）
+    trend_partial_confirm_enabled: true
+    trend_partial_confirm_ratio: 0.7
+    # 趋势强度（价格在 60 日区间分位）
+    trend_position_strength_enabled: false
+    # 反转：放量止跌加成
+    reversion_volume_bounce_enabled: true
+    reversion_volume_bounce_ratio: 1.2
+    reversion_volume_bounce_bonus: 1.1
+    # 反转急跌/阴跌权重
+    reversion_acute_slow_enabled: false
+    reversion_acute_threshold: -0.08
+    reversion_slow_threshold: -0.03
+    reversion_acute_weight: 1.2
+    reversion_slow_weight: 0.6
+    # 突破 3 日有效确认
+    breakout_hold_days: 0
+    breakout_hold_ratio: 0.98
+    # 第四池动量
+    pool_4_momentum_enabled: false
+    momentum_percentile_threshold: 0.80
+    # 多池融合：加权（默认）| max
+    fusion_mode: weighted
+    fusion_weights: [0.7, 0.2, 0.1]
+    # 多池共振二档
+    multi_pool_tier2_enabled: false
+    multi_pool_tier2_threshold: 60
+    multi_pool_tier2_bonus: 5
+    # 输出截面分位（默认开启）
+    output_score_percentile: true
+  filters:
+    sector_strength:
+      enabled: false
+    liquidity:
+      enabled: false
+      min_score: 0
+      as_filter: true
+    volatility_regime:
+      enabled: false
+      percentile_threshold: 0.90
+      penalty_ratio: 0.8
+  # 变量说明见文件顶部 scanner 节点变量说明
+  # ---------- B 轨长期价值发现（long_term）----------
+  # long_term_enabled           bool   是否计算长期动量并输出 long_term_score / long_term_candidate；默认 true
+  # long_term_lookback_days     int    长期收益回溯天数（如 120）；需 OHLCV 至少该长度
+  # long_term_score_threshold   float  截面分位 [0,1] 达到该值视为 B 轨候选（long_term_candidate=True）；默认 0.6
+  # -------------------------------------------------------------------------
+  long_term:
+    enabled: true
+    lookback_days: 120
+    score_threshold: 0.6
   scanner:
     technical_score_threshold: 70
     sector_strength_threshold: 1.0
+    pass_require_lead_pool_min: null
+    pass_require_second_pool_min: null
