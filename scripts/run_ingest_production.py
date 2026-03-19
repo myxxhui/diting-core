@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -107,7 +108,26 @@ def _financial_refresh_days() -> int:
 
 
 def _news_always_refresh() -> bool:
-    return _env_bool("INGEST_NEWS_ALWAYS_REFRESH", default=True)
+    return _env_bool("INGEST_NEWS_ALWAYS_REFRESH", default=False)
+
+
+def _news_stale_days() -> int:
+    """新闻「已有最新」判定：DB 中该标的最近一条新闻在 N 天内则跳过拉取。默认 1。"""
+    return _env_int("INGEST_NEWS_STALE_DAYS", 1, 0, 30)
+
+
+def _news_parallel() -> int:
+    """新闻拉取并行数：1=串行（默认）；>1 时本批多标的同时请求远程 API，缩短运行时间。"""
+    raw = (os.environ.get("INGEST_NEWS_PARALLEL") or "").strip()
+    try:
+        return max(1, min(16, int(raw))) if raw else 1
+    except ValueError:
+        return 1
+
+
+def _ingest_symbol_names() -> bool:
+    """是否在采集时拉取并写入标的中文名到 L2 symbol_names 表。默认 True。"""
+    return _env_bool("INGEST_SYMBOL_NAMES", default=True)
 
 
 def _batch_size() -> int:
@@ -128,6 +148,27 @@ def _separate_phases() -> bool:
 
 def _phase_pause_sec() -> float:
     return _env_float("INGEST_PHASE_PAUSE_SEC", 30.0)
+
+
+def _concurrent_steps() -> int:
+    """
+    行业/财务/新闻「同时拉几只标的」：1=一只一只拉（串行），3=同时拉 3 只再下一组。
+    由 INGEST_PRODUCTION_CONCURRENT_STEPS 配置，设大可能触发数据源限流。
+    """
+    raw = (os.environ.get("INGEST_PRODUCTION_CONCURRENT_STEPS") or "").strip()
+    try:
+        return max(1, min(8, int(raw))) if raw else 1
+    except ValueError:
+        return 1
+
+
+def _ohlcv_batch_chunk_size() -> int:
+    """K 线全量一次最多传多少只标的给 run_ingest_ohlcv，0=不切分整批传。避免单次传 150 只触发限流。"""
+    raw = (os.environ.get("INGEST_OHLCV_BATCH_CHUNK_SIZE") or "50").strip()
+    try:
+        return max(0, min(200, int(raw))) if raw else 0
+    except ValueError:
+        return 50
 
 
 def _resume_enabled() -> bool:
@@ -256,7 +297,7 @@ def _financial_updated_at_batch(symbols: list) -> dict:
 
 
 def _news_latest_dates_batch(symbols: list) -> dict:
-    """返回 {symbol: max_published_at(datetime)} — 新闻最新发布时间。"""
+    """返回 {symbol: max_published_at(datetime)}。与写入一致：均使用 L2 表 news_content。"""
     if not symbols:
         return {}
     syms = [s.strip().upper() for s in symbols if (s or "").strip()]
@@ -274,6 +315,25 @@ def _news_latest_dates_batch(symbols: list) -> dict:
     except Exception as e:
         logger.warning("查询新闻最新日期失败: %s", e)
         return {}
+
+
+def _log_ingest_verify(symbols_full: list, total: int):
+    """拉取完成后重新查 DB，输出各维度已写入的标的数。"""
+    parts = []
+    if _ingest_enabled("OHLCV"):
+        n = len(_ohlcv_latest_dates_batch(symbols_full))
+        parts.append("K线 %s/%s" % (n, total))
+    if _ingest_enabled("INDUSTRY_REVENUE"):
+        n = len(_industry_updated_at_batch(symbols_full))
+        parts.append("行业 %s/%s" % (n, total))
+    if _ingest_enabled("FINANCIAL"):
+        n = len(_financial_updated_at_batch(symbols_full))
+        parts.append("财务 %s/%s" % (n, total))
+    if _ingest_enabled("NEWS"):
+        n = len(_news_latest_dates_batch(symbols_full))
+        parts.append("新闻 %s/%s" % (n, total))
+    if parts:
+        logger.info("拉取完成，校验: %s 已写入", " | ".join(parts))
 
 
 # ===== 增量决策函数 =====
@@ -335,14 +395,25 @@ def _decide_financial(sym_key: str, updated_map: dict, mode: str, now: datetime)
     return False, f"数据新鲜（{age} 天前更新）"
 
 
-def _decide_news(sym_key: str, news_map: dict, mode: str):
+def _decide_news(sym_key: str, news_map: dict, mode: str, now: datetime = None):
+    """已有最新新闻则跳过；无或过期才拉。最新=DB 该标的最近新闻在 INGEST_NEWS_STALE_DAYS 天内。"""
     if mode == "full":
         return True, "全量模式"
     if _news_always_refresh():
         return True, "始终刷新（INGEST_NEWS_ALWAYS_REFRESH=true）"
     if sym_key not in news_map:
         return True, "无历史数据"
-    return False, "已有数据且未启用始终刷新"
+    max_pub = news_map[sym_key]
+    if max_pub is None or now is None:
+        return True, "无历史数据" if max_pub is None else "无时间参考"
+    stale_days = _news_stale_days()
+    if max_pub.tzinfo is None:
+        age_days = (now.replace(tzinfo=None) - max_pub).days
+    else:
+        age_days = (now - max_pub).days
+    if age_days <= stale_days:
+        return False, "已有最新新闻（%s 天内）" % stale_days
+    return True, "新闻已过期（%s 天前）" % age_days
 
 
 # ===== 进度断点 =====
@@ -404,6 +475,32 @@ def _ingest_ohlcv_incremental(sym_raw: str, start_str: str, end_str: str) -> int
 # ===== 主流程 =====
 
 
+def _apply_requests_timeout_patch():
+    """进程级补丁：所有 requests 请求默认超时，避免行业/财务/新闻等 akshare 调用卡死。"""
+    import requests
+    timeout_sec = 45
+    raw = (os.environ.get("INGEST_REQUESTS_TIMEOUT") or "").strip()
+    if raw:
+        try:
+            timeout_sec = max(10, min(120, int(raw)))
+        except ValueError:
+            pass
+    _orig_get = requests.get
+    _orig_session_request = requests.Session.request
+
+    def _patched_get(url, *args, **kwargs):
+        kwargs.setdefault("timeout", timeout_sec)
+        return _orig_get(url, *args, **kwargs)
+
+    def _patched_session_request(self, method, url, *args, **kwargs):
+        kwargs.setdefault("timeout", timeout_sec)
+        return _orig_session_request(self, method, url, *args, **kwargs)
+
+    requests.get = _patched_get
+    requests.Session.request = _patched_session_request
+    logger.info("已启用 requests 进程级超时: %s 秒（行业/财务/新闻/K线 均生效，可设 INGEST_REQUESTS_TIMEOUT 覆盖）", timeout_sec)
+
+
 def main() -> int:
     if _env_bool("DITING_INGEST_MOCK", default=False):
         logger.error("生产采集禁止使用 DITING_INGEST_MOCK=1")
@@ -413,6 +510,8 @@ def main() -> int:
     except ImportError:
         logger.error("缺少 akshare，请先 pip install akshare")
         return 1
+
+    _apply_requests_timeout_patch()
 
     mode = _get_ingest_mode()
     today = date.today()
@@ -440,24 +539,51 @@ def main() -> int:
         return 1
     symbols_raw = [s.split(".")[0] for s in symbols_full]
     total = len(symbols_raw)
+    logger.info("标的总数: %s 只", total)
 
-    # ② 增量状态一次性批量查询
-    logger.info("正在检测各维度数据状态（%s 只标的）…", total)
-    ohlcv_latest = _ohlcv_latest_dates_batch(symbols_full) if _ingest_enabled("OHLCV") else {}
-    industry_updated = _industry_updated_at_batch(symbols_full) if _ingest_enabled("INDUSTRY_REVENUE") else {}
-    financial_updated = _financial_updated_at_batch(symbols_full) if _ingest_enabled("FINANCIAL") else {}
-    news_latest = _news_latest_dates_batch(symbols_full) if _ingest_enabled("NEWS") else {}
+    # ①.5 标的中文名：从 akshare 拉取当前标的池名称并写入 L2 symbol_names（B 模块/扫描器用）
+    if _ingest_symbol_names():
+        try:
+            from diting.scanner.symbol_names import _fetch_from_akshare, _save_to_db
+            dsn = get_pg_l2_dsn()
+            if dsn:
+                names = _fetch_from_akshare(symbols_full)
+                if names:
+                    _save_to_db(dsn, names, "akshare")
+                    logger.info("已拉取并写入标的中文名 %s 条到 L2 symbol_names", len(names))
+                else:
+                    logger.debug("未拉取到标的中文名（akshare 可能不可用）")
+        except Exception as e:
+            logger.warning("拉取/写入标的中文名失败（不影响后续采集）: %s", e)
+
+    # ② 增量状态：4 个维度并行批量查询（一次 round-trip 完成）
+    logger.info("正在检测各维度数据状态（%s 只标的，并行查询 L1/L2）…", total)
+    ohlcv_latest, industry_updated, financial_updated, news_latest = {}, {}, {}, {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_ohlcv = ex.submit(_ohlcv_latest_dates_batch, symbols_full) if _ingest_enabled("OHLCV") else None
+        f_ind = ex.submit(_industry_updated_at_batch, symbols_full) if _ingest_enabled("INDUSTRY_REVENUE") else None
+        f_fin = ex.submit(_financial_updated_at_batch, symbols_full) if _ingest_enabled("FINANCIAL") else None
+        f_news = ex.submit(_news_latest_dates_batch, symbols_full) if _ingest_enabled("NEWS") else None
+        if f_ohlcv:
+            ohlcv_latest = f_ohlcv.result()
+        if f_ind:
+            industry_updated = f_ind.result()
+        if f_fin:
+            financial_updated = f_fin.result()
+        if f_news:
+            news_latest = f_news.result()
 
     # 统计摘要
     if mode == "auto":
         ohlcv_skip = sum(1 for sf in symbols_full if not _decide_ohlcv(sf.strip().upper(), ohlcv_latest, mode, today)[0])
         ind_skip = sum(1 for sf in symbols_full if not _decide_industry(sf.strip().upper(), industry_updated, mode, now)[0])
         fin_skip = sum(1 for sf in symbols_full if not _decide_financial(sf.strip().upper(), financial_updated, mode, now)[0])
-        news_skip = sum(1 for sf in symbols_full if not _decide_news(sf.strip().upper(), news_latest, mode)[0])
+        news_skip = sum(1 for sf in symbols_full if not _decide_news(sf.strip().upper(), news_latest, mode, now)[0])
         logger.info(
             "增量检测: K线 需更新 %s/%s | 行业 需更新 %s/%s | 财务 需更新 %s/%s | 新闻 需更新 %s/%s",
             total - ohlcv_skip, total, total - ind_skip, total, total - fin_skip, total, total - news_skip, total,
         )
+        logger.info("（上述为本轮将拉取的标的数，进度行会标出每只实际拉取的维度）")
 
     # 全量模式参数
     days_back = _ohlcv_days_back() if _ingest_enabled("OHLCV") else 0
@@ -490,6 +616,9 @@ def main() -> int:
             delay_sec, batch_size, batch_pause,
         )
 
+    # 拉取完成后重新检查 DB，确认各维度已写入并输出提示
+    _log_ingest_verify(symbols_full, total)
+
     _clear_progress()
     logger.info("=" * 60)
     logger.info("采集完成 (%s 模式)", mode.upper())
@@ -513,20 +642,21 @@ def _run_phases_separate(
         cnt_done, cnt_skip = 0, 0
         for i, (sym_raw, sym_full) in enumerate(zip(symbols_raw, symbols_full)):
             sym_key = sym_full.strip().upper()
+            remaining = total - (i + 1)
             should, inc_start, inc_end, reason = _decide_ohlcv(sym_key, ohlcv_latest, mode, today)
             if not should:
                 cnt_skip += 1
                 if i < 3 or (i + 1) == total:
-                    logger.info("  [%s/%s] %s 跳过: %s", i + 1, total, sym_full, reason)
+                    logger.info("  [%s/%s] 剩余 %s 只 | %s 跳过: %s", i + 1, total, remaining, sym_full, reason)
                 continue
-            logger.info("  [%s/%s] %s 采集: %s", i + 1, total, sym_full, reason)
+            logger.info("  [%s/%s] 剩余 %s 只 | %s 采集: %s", i + 1, total, remaining, sym_full, reason)
             try:
                 if inc_start and inc_end:
                     n = _ingest_ohlcv_incremental(sym_raw, inc_start, inc_end)
                 else:
                     n = run_ingest_ohlcv(symbols=[sym_raw], days_back=days_back)
                 cnt_done += 1
-                logger.info("  [%s/%s] %s 写入 %s 行", i + 1, total, sym_full, n or 0)
+                logger.info("  [%s/%s] 剩余 %s 只 | %s 写入 %s 行", i + 1, total, total - (i + 1), sym_full, n or 0)
             except Exception as e:
                 logger.warning("  [%s/%s] %s 失败: %s", i + 1, total, sym_full, e)
             if delay_sec > 0 and i < total - 1:
@@ -546,13 +676,14 @@ def _run_phases_separate(
         cnt_done, cnt_skip = 0, 0
         for j, sym_full in enumerate(symbols_full):
             sym_key = sym_full.strip().upper()
+            remaining = total - (j + 1)
             should, reason = _decide_industry(sym_key, industry_updated, mode, now)
             if not should:
                 cnt_skip += 1
                 if j < 3 or (j + 1) == total:
-                    logger.info("  [%s/%s] %s 跳过: %s", j + 1, total, sym_full, reason)
+                    logger.info("  [%s/%s] 剩余 %s 只 | %s 跳过: %s", j + 1, total, remaining, sym_full, reason)
                 continue
-            logger.info("  [%s/%s] %s 采集: %s", j + 1, total, sym_full, reason)
+            logger.info("  [%s/%s] 剩余 %s 只 | %s 采集: %s", j + 1, total, remaining, sym_full, reason)
             try:
                 run_ingest_industry_revenue(sym_full)
                 cnt_done += 1
@@ -573,17 +704,18 @@ def _run_phases_separate(
         cnt_done, cnt_skip = 0, 0
         for j, sym_full in enumerate(symbols_full):
             sym_key = sym_full.strip().upper()
+            remaining = total - (j + 1)
             should, reason = _decide_financial(sym_key, financial_updated, mode, now)
             if not should:
                 cnt_skip += 1
                 if j < 3 or (j + 1) == total:
-                    logger.info("  [%s/%s] %s 跳过: %s", j + 1, total, sym_full, reason)
+                    logger.info("  [%s/%s] 剩余 %s 只 | %s 跳过: %s", j + 1, total, remaining, sym_full, reason)
                 continue
-            logger.info("  [%s/%s] %s 采集: %s", j + 1, total, sym_full, reason)
+            logger.info("  [%s/%s] 剩余 %s 只 | %s 采集: %s", j + 1, total, remaining, sym_full, reason)
             try:
                 n = run_ingest_financial(sym_full)
                 cnt_done += 1
-                logger.info("  [%s/%s] %s 写入 %s 期", j + 1, total, sym_full, n)
+                logger.info("  [%s/%s] 剩余 %s 只 | %s 写入 %s 期", j + 1, total, remaining, sym_full, n)
             except Exception as e:
                 logger.warning("  [%s/%s] %s 失败: %s", j + 1, total, sym_full, e)
             if delay_sec > 0 and j < total - 1:
@@ -601,18 +733,20 @@ def _run_phases_separate(
         cnt_done, cnt_skip = 0, 0
         for k, sym_full in enumerate(symbols_full):
             sym_key = sym_full.strip().upper()
-            should, reason = _decide_news(sym_key, news_latest, mode)
+            remaining = total - (k + 1)
+            should, reason = _decide_news(sym_key, news_latest, mode, now)
             if not should:
                 cnt_skip += 1
                 if k < 3 or (k + 1) == total:
-                    logger.info("  [%s/%s] %s 跳过: %s", k + 1, total, sym_full, reason)
+                    logger.info("  [%s/%s] 剩余 %s 只 | %s 跳过: %s", k + 1, total, remaining, sym_full, reason)
                 continue
-            logger.info("  [%s/%s] %s 采集: %s", k + 1, total, sym_full, reason)
+            logger.info("  [%s/%s] 剩余 %s 只 | %s 采集: %s", k + 1, total, remaining, sym_full, reason)
             try:
+                db_max = news_latest.get(sym_key)
                 if unified_start and unified_end:
-                    run_ingest_news(symbol=sym_full, date_start=unified_start, date_end=unified_end)
+                    run_ingest_news(symbol=sym_full, date_start=unified_start, date_end=unified_end, db_max_published_at=db_max)
                 else:
-                    run_ingest_news(symbol=sym_full, days_back=news_days if news_days > 0 else None)
+                    run_ingest_news(symbol=sym_full, days_back=news_days if news_days > 0 else None, db_max_published_at=db_max)
                 cnt_done += 1
             except Exception as e:
                 logger.warning("  [%s/%s] %s 失败: %s", k + 1, total, sym_full, e)
@@ -644,61 +778,118 @@ def _run_phases_combined(
         batch_raw = batches_raw[i]
         batch_full = batches_full[i]
         start_idx = i * batch_size
+        batch_end = start_idx + len(batch_raw)
+        remaining_after_batch = total - batch_end
         logger.info(
-            "======== 第 %s/%s 批（标的 %s～%s）========",
-            i + 1, n_batches, start_idx + 1, start_idx + len(batch_raw),
+            "======== 第 %s/%s 批 | 总进度: 第 %s～%s 只/共 %s 只（本批完成后剩余 %s 只）========",
+            i + 1, n_batches, start_idx + 1, batch_end, total, remaining_after_batch,
         )
-        for j, (sym_raw, sym_full) in enumerate(zip(batch_raw, batch_full)):
+
+        # 本批每只标的「要不要拉」的结论（用于按标的 一起检查、一起拉）
+        need_ohlcv_full = set()
+        need_ohlcv_inc = {}  # sym_raw -> (inc_start, inc_end)
+        need_industry = set()
+        need_financial = set()
+        need_news = set()
+        for sym_raw, sym_full in zip(batch_raw, batch_full):
             sym_key = sym_full.strip().upper()
-            did_any = False
-
             if _ingest_enabled("OHLCV"):
-                should, inc_start, inc_end, reason = _decide_ohlcv(sym_key, ohlcv_latest, mode, today)
+                should, inc_start, inc_end, _ = _decide_ohlcv(sym_key, ohlcv_latest, mode, today)
                 if should:
-                    try:
-                        if inc_start and inc_end:
-                            _ingest_ohlcv_incremental(sym_raw, inc_start, inc_end)
-                        else:
-                            run_ingest_ohlcv(symbols=[sym_raw], days_back=days_back)
-                        did_any = True
-                    except Exception as e:
-                        logger.warning("K线 %s 失败: %s", sym_full, e)
+                    if inc_start and inc_end:
+                        need_ohlcv_inc[sym_raw] = (inc_start, inc_end)
+                    else:
+                        need_ohlcv_full.add(sym_raw)
+            if _ingest_enabled("INDUSTRY_REVENUE") and _decide_industry(sym_key, industry_updated, mode, now)[0]:
+                need_industry.add(sym_full)
+            if _ingest_enabled("FINANCIAL") and _decide_financial(sym_key, financial_updated, mode, now)[0]:
+                need_financial.add(sym_full)
+            if _ingest_enabled("NEWS") and _decide_news(sym_key, news_latest, mode, now)[0]:
+                need_news.add(sym_full)
 
-            if _ingest_enabled("INDUSTRY_REVENUE"):
-                should, reason = _decide_industry(sym_key, industry_updated, mode, now)
-                if should:
-                    try:
-                        run_ingest_industry_revenue(sym_full)
-                        did_any = True
-                    except Exception as e:
-                        logger.warning("行业 %s 失败: %s", sym_full, e)
+        # 按标的：每只先检查、再 K线/行业/财务/新闻 一起拉完，再下一只（断点续跑时单只完整）
+        for j, (sym_raw, sym_full) in enumerate(zip(batch_raw, batch_full)):
+            current_global = start_idx + j + 1
+            remaining = total - current_global
+            did_ohlcv = False
+            did_industry = False
+            did_financial = False
+            did_news = False
 
-            if _ingest_enabled("FINANCIAL"):
-                should, reason = _decide_financial(sym_key, financial_updated, mode, now)
-                if should:
-                    try:
-                        run_ingest_financial(sym_full)
-                        did_any = True
-                    except Exception as e:
-                        logger.warning("财务 %s 失败: %s", sym_full, e)
+            if sym_raw in need_ohlcv_full:
+                try:
+                    run_ingest_ohlcv(symbols=[sym_raw], days_back=days_back)
+                    did_ohlcv = True
+                except Exception as e:
+                    logger.warning("K线 全量 %s 失败: %s", sym_full, e)
+            elif sym_raw in need_ohlcv_inc:
+                inc_start, inc_end = need_ohlcv_inc[sym_raw]
+                try:
+                    _ingest_ohlcv_incremental(sym_raw, inc_start, inc_end)
+                    did_ohlcv = True
+                except Exception as e:
+                    logger.warning("K线 增量 %s 失败: %s", sym_full, e)
 
-            if _ingest_enabled("NEWS"):
-                should, reason = _decide_news(sym_key, news_latest, mode)
-                if should:
-                    try:
-                        if unified_start and unified_end:
-                            run_ingest_news(symbol=sym_full, date_start=unified_start, date_end=unified_end)
-                        else:
-                            run_ingest_news(symbol=sym_full, days_back=news_days if news_days > 0 else None)
-                        did_any = True
-                    except Exception as e:
-                        logger.warning("新闻 %s 失败: %s", sym_full, e)
+            if sym_full in need_industry:
+                try:
+                    run_ingest_industry_revenue(sym_full)
+                    did_industry = True
+                except Exception as e:
+                    logger.warning("行业 %s 失败: %s", sym_full, e)
 
-            if not did_any:
-                logger.info("标的 %s 各维度均跳过", sym_full)
+            if sym_full in need_financial:
+                try:
+                    run_ingest_financial(sym_full)
+                    did_financial = True
+                except Exception as e:
+                    logger.warning("财务 %s 失败: %s", sym_full, e)
+
+            if sym_full in need_news and _news_parallel() <= 1:
+                try:
+                    db_max = news_latest.get(sym_key)
+                    if unified_start and unified_end:
+                        run_ingest_news(symbol=sym_full, date_start=unified_start, date_end=unified_end, db_max_published_at=db_max)
+                    else:
+                        run_ingest_news(symbol=sym_full, days_back=news_days if news_days > 0 else None, db_max_published_at=db_max)
+                    did_news = True
+                except Exception as e:
+                    logger.warning("新闻 %s 失败: %s", sym_full, e)
+
+            parts = []
+            if did_ohlcv:
+                parts.append("K线")
+            if did_industry:
+                parts.append("行业")
+            if did_financial:
+                parts.append("财务")
+            if did_news:
+                parts.append("新闻")
+            if parts:
+                logger.info("[%s/%s] 剩余 %s 只 | %s 已拉 %s", current_global, total, remaining, sym_full, "+".join(parts))
+            else:
+                logger.info("[%s/%s] 剩余 %s 只 | %s 各维度均跳过", current_global, total, remaining, sym_full)
 
             if delay_sec > 0 and j < len(batch_full) - 1:
                 time.sleep(delay_sec)
+
+        # 新闻并行：本批多标的同时请求远程 API，拉取后与 db_max 比较，无新数据则不写
+        if need_news and _news_parallel() > 1:
+            logger.info("本批 新闻: %s 只（并行 %s，远程无新则跳过写入）", len(need_news), _news_parallel())
+
+            def _do_news_one(sym_full):
+                sym_key = sym_full.strip().upper()
+                try:
+                    if unified_start and unified_end:
+                        run_ingest_news(symbol=sym_full, date_start=unified_start, date_end=unified_end, db_max_published_at=news_latest.get(sym_key))
+                    else:
+                        run_ingest_news(symbol=sym_full, days_back=news_days if news_days > 0 else None, db_max_published_at=news_latest.get(sym_key))
+                except Exception as e:
+                    logger.warning("新闻 %s 失败: %s", sym_full, e)
+
+            with ThreadPoolExecutor(max_workers=_news_parallel()) as ex:
+                futures = [ex.submit(_do_news_one, sym) for sym in need_news]
+                for fut in as_completed(futures):
+                    fut.result()
 
         completed += len(batch_raw)
         _write_progress(completed)

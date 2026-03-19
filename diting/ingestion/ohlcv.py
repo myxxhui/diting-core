@@ -247,9 +247,12 @@ def _fetch_akshare_ohlcv(
     import requests
     import akshare as ak
 
-    # 东方财富：浏览器头 + 超时，降低被断连/误判为脚本的概率
+    # 东方财富：浏览器头 + 超时，降低被断连/误判为脚本的概率；所有请求统一加超时避免卡死
     _orig_get = requests.get
+    _timeout_sec = 45  # 单次请求超时，超时后重试
+
     def _get_with_headers(url, *args, **kwargs):
+        kwargs.setdefault("timeout", _timeout_sec)
         if "eastmoney.com" in (url or ""):
             h = kwargs.setdefault("headers", {})
             h.setdefault("User-Agent", (
@@ -259,8 +262,8 @@ def _fetch_akshare_ohlcv(
             h.setdefault("Referer", "https://quote.eastmoney.com/")
             h.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             h.setdefault("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-            kwargs.setdefault("timeout", 60)
         return _orig_get(url, *args, **kwargs)
+
     requests.get = _get_with_headers
     try:
         for attempt in range(max_retries):
@@ -268,6 +271,8 @@ def _fetch_akshare_ohlcv(
                 if attempt == 0:
                     # 首请求前延迟 + 随机抖动，降低云服务器上被限流概率
                     time.sleep(2 + random.uniform(0, 3))
+                if attempt > 0:
+                    logger.info("K 线 重试第 %s 次拉取 %s（超时 %ss）", attempt + 1, symbol, _timeout_sec)
                 df = ak.stock_zh_a_hist(
                     symbol=symbol,
                     period=period,
@@ -422,6 +427,7 @@ def run_ingest_ohlcv(
             logger.info("K 线 数据源=%s，本批 %s 只，串行采集", source, len(symbols))
             for i, sym in enumerate(symbols):
                 try:
+                    logger.info("K 线 正在拉取 %s…", sym)
                     rows = _fetch_ohlcv(sym, period, start_str, end_str)
                     all_rows.extend(rows)
                     if len(symbols) == 1:

@@ -1,10 +1,10 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast deps-ingest build-images build-module-a deps-classifier deps-scanner diting prod run-module-a query-module-a-output init-l2-classifier-table run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table init-l2-symbol-names-table test-scanner
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production query-ingest-overview check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast fetch-sector-symbols deps-ingest build-images build-module-a deps-classifier deps-scanner diting prod run-module-a query-module-a-output init-l2-classifier-table run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table init-l2-symbol-names-table test-scanner
 
-# 采集相关 target 使用的 Python：akshare 要求 >= 3.8，优先 python3.8（若已安装）
-PYTHON_INGEST := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
+# 采集相关 target 使用的 Python：akshare 推荐 >= 3.9。Make 解析时用非交互 shell，需先加载 pyenv 才能找到 pyenv 安装的 3.9
+PYTHON_INGEST := $(shell export PYENV_ROOT="$$HOME/.pyenv" && [ -d "$$PYENV_ROOT/bin" ] && export PATH="$$PYENV_ROOT/bin:$$PATH" && eval "$$(pyenv init - 2>/dev/null)" 2>/dev/null; command -v python3.11 2>/dev/null || command -v python3.10 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3.8 2>/dev/null || command -v python3 2>/dev/null)
 # Stage3-02 扫描引擎：TA-Lib 需 Python 3.7+ 且系统已装 ta-lib C 库；优先 python3.8 以使用已安装的 TA-Lib
 PYTHON_SCANNER := $(shell command -v python3.8 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3 2>/dev/null)
 
@@ -19,12 +19,12 @@ deps-scanner:
 	echo "使用 $$py 安装扫描引擎依赖..."; \
 	cd "$$root" && $$py -m pip install -r requirements-scanner.txt && $$py -m pip install pytest -q && echo "deps-scanner OK（可执行 make run-module-b / make verify-module-b / make test-scanner）"
 
-# Stage2-06 采集依赖（真实行情）：akshare、psycopg2、redis 等；06_ 步骤 3、7、8 执行前须先 make deps-ingest。akshare 要求 Python >= 3.8
+# Stage2-06 采集依赖（真实行情）：akshare、psycopg2、redis 等；06_ 步骤 3、7、8 执行前须先 make deps-ingest。akshare 要求 >= 3.8（3.9+ 无告警，若系统有 3.9+ 会优先用）
 # 先装 akshare --no-deps 再装 core 依赖，避免 akshare 1.18+ 的 curl_cffi>=0.13 与部分环境不兼容
 deps-ingest:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	py="$(PYTHON_INGEST)"; [ -z "$$py" ] && { echo "错误: 未找到 python3.8/python3.9/python3"; exit 1; }; \
-	$$py -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" || { echo "错误: akshare 要求 Python >= 3.8，当前: $$($$py --version 2>&1)。请安装 Python 3.8+（如 dnf install python38）或使用 pyenv/conda。"; exit 1; }; \
+	$$py -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" || { echo "错误: akshare 要求 Python >= 3.8，当前: $$($$py --version 2>&1)。请安装 Python 3.8+ 或使用 pyenv/conda。"; exit 1; }; \
 	echo "使用 $$py，安装 akshare（无依赖）与采集运行时依赖..."; \
 	cd "$$root" && $$py -m pip install --no-deps "akshare==1.17.1" && $$py -m pip install -r requirements-ingest-core.txt && echo "deps-ingest OK（可执行 make ingest-test-real / make ingest-production）"
 
@@ -78,6 +78,12 @@ report-production-data:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/check_production_data_report.py
 
+# 一键查询采集已落库数据：标的列表、中文名、K线条数/日期范围、新闻/行业/财务概况（见 06_生产级数据要求_实践）
+query-ingest-overview:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/query_ingest_data_overview.py
+
 # DSN 与表一致性诊断：与 ingest 同源 config 取 DSN，列出 L1 ohlcv 全表概况与 symbol 样本、L2 industry_revenue_summary 样本（见 06_生产级数据要求_实践）
 check-ohlcv-consistency:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
@@ -103,9 +109,30 @@ ingest-deploy:
 	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_deploy.py
 
 # Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线。默认串行+标间延迟（CONCURRENT=1、DELAY=3s）减轻东方财富断连；仍断连可设 INGEST_OHLCV_SOURCE=baostock 或加大 INGEST_OHLCV_DELAY_BETWEEN_SYMBOLS。
+# 执行前仅同步「连接相关」变量（TIMESCALE_DSN、PG_L2_DSN、REDIS_URL、KUBECONFIG、PUBLIC_IP）从 prod.conn 到 .env，不覆盖其它配置。
+# 可通过 PROD_CONN_FILE 指定 prod.conn 路径，未设则使用 ../diting-infra/prod.conn（相对本仓根目录）。
 # 不在此处 export 默认值，由脚本加载 .env；未设置的变量才用脚本内默认参数。
+CONN_KEYS_PATTERN = ^(TIMESCALE_DSN|PG_L2_DSN|REDIS_URL|KUBECONFIG|PUBLIC_IP)=
 ingest-production:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	conn_file="$(PROD_CONN_FILE)"; [ -z "$$conn_file" ] && conn_file="$$root/../diting-infra/prod.conn"; \
+	if [ -f "$$conn_file" ]; then \
+		if [ ! -f "$$root/.env" ]; then \
+			cp "$$conn_file" "$$root/.env"; \
+			echo "已从 prod.conn 创建 .env（首次）"; \
+		else \
+			_p=$$(grep -E '^(TIMESCALE_DSN|PG_L2_DSN|REDIS_URL)=' "$$conn_file" 2>/dev/null | sort); \
+			_e=$$(grep -E '^(TIMESCALE_DSN|PG_L2_DSN|REDIS_URL)=' "$$root/.env" 2>/dev/null | sort); \
+			if [ "$$_p" != "$$_e" ]; then \
+				_t="$$root/.env.ingest.tmp"; \
+				grep -E '$(CONN_KEYS_PATTERN)' "$$conn_file" 2>/dev/null > "$$_t.conn"; \
+				grep -v -E '$(CONN_KEYS_PATTERN)' "$$root/.env" 2>/dev/null > "$$_t.other"; \
+				cat "$$_t.conn" "$$_t.other" > "$$root/.env"; \
+				rm -f "$$_t.conn" "$$_t.other"; \
+				echo "已用 prod.conn 仅同步连接相关变量到 .env（其它配置未改动）"; \
+			fi; \
+		fi; \
+	fi; \
 	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
 
 # 同上，但后台运行：nohup 将输出写入 INGEST_PROD_LOG（默认 ingest-production.log），关终端不杀进程；查看进度: tail -f $(INGEST_PROD_LOG)
@@ -135,6 +162,11 @@ ingest-production-incremental-fast:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && export INGEST_OHLCV_CONCURRENT=5 INGEST_OHLCV_RATE_PER_SEC=2.0 && \
 	PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production_incremental.py
+
+# 从 akshare 拉取「有色金属」「电力」板块成分股并追加到 config/diting_symbols.txt（需先 make deps-ingest）
+fetch-sector-symbols:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/fetch_sector_symbols_and_append.py
 
 # Stage2-02 一键构建本阶段所涉全部镜像（仅构建；推送用 make push-images）[Ref: 02_采集逻辑与Dockerfile_实践, 01_语义分类器_实践]
 DOCKER_PLATFORM ?= linux/amd64

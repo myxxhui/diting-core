@@ -261,18 +261,34 @@ def _records_to_rows(records: list, symbol: str, source: str, source_type: str =
     return rows
 
 
+def _max_published_at_from_records(records: list) -> Optional[datetime]:
+    """从 API 返回的 record 列表中取最新发布时间，用于与 DB 比较。"""
+    if not records:
+        return None
+    dates = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        dt = _parse_news_date(r)
+        if dt is not None:
+            dates.append(dt)
+    return max(dates) if dates else None
+
+
 def run_ingest_news(
     symbol: str = None,
     days_back: int = None,
     date_start: str = None,
     date_end: str = None,
+    db_max_published_at: datetime = None,
 ) -> int:
     """
     执行 ingest_news：国内 AkShare + 国际 OpenBB，写入 L2 data_versions。
     symbol 为 None：拉取全市场最新资讯 + OpenBB 宏观（各写一条版本）。
-    symbol 不为 None：拉取该标的个股新闻（stock_news_em）并写入 L2，用于生产级每标的数据。
+    symbol 不为 None：拉取该标的个股新闻（stock_news_em）；若传入 db_max_published_at 且远程最新时间不新于它，则不写入（远程无新数据）。
     days_back：仅保留最近 N 天内的新闻（按条目的日期字段过滤）；None 或 0 表示不过滤。
     date_start/date_end：与 days_back 二选一；指定时只保留日期在 [date_start, date_end] 内的新闻（格式 YYYY-MM-DD 或 YYYYMMDD）。
+    db_max_published_at：该标的在 DB 中的最新发布时间；若远程 API 最新不新于此则跳过写入。
     工作目录: diting-core。DITING_INGEST_MOCK=1 时写入两条 mock 版本（akshare + openbb）。
     """
     written = 0
@@ -409,6 +425,18 @@ def run_ingest_news(
                         records = _filter_news_by_date_range(records, start_d, end_d)
                 elif days_back and days_back > 0:
                     records = _filter_news_by_days(records, days_back)
+                # 远程 API 无新数据则不写：比较远程最新时间与 DB 最新时间
+                if db_max_published_at is not None and records:
+                    max_remote = _max_published_at_from_records(records)
+                    if max_remote is not None:
+                        db_max = db_max_published_at
+                        if db_max.tzinfo is None:
+                            db_max = db_max.replace(tzinfo=timezone.utc)
+                        if max_remote.tzinfo is None:
+                            max_remote = max_remote.replace(tzinfo=timezone.utc)
+                        if max_remote <= db_max:
+                            logger.info("ingest_news: akshare symbol=%s 远程无新数据（最新 %s），跳过写入", symbol, max_remote)
+                            return 0
                 version_id = f"news_{symbol}_{now.strftime('%Y%m%d%H%M%S')}"
                 file_path = f"l2/news/{symbol}.json"
                 file_size = len(str(records)) if records else 0
