@@ -44,6 +44,20 @@ def _load_industry_fallback(symbol: str) -> Optional[str]:
     return _fallback_cache.get(symbol)
 
 
+# L2 或 API 可能写入「-」等占位，与空字符串一样应触发 industry_fallback
+_PLACEHOLDER_INDUSTRY_NAMES = frozenset(
+    ("-", "—", "－", "--", "未知", "N/A", "n/a", "None", "null", "NULL")
+)
+
+
+def industry_name_needs_fallback(name: str) -> bool:
+    """行业名为空或为占位符时返回 True，应使用 industry_fallback.csv 或「未知」。"""
+    s = (name or "").strip()
+    if not s:
+        return True
+    return s in _PLACEHOLDER_INDUSTRY_NAMES
+
+
 def _safe_float(v, default: float = 0.0) -> float:
     if v is None:
         return default

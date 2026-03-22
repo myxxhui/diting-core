@@ -1,0 +1,22 @@
+# Mirrors diting-doc/.../dna_a_track_position_lifecycle.yaml (runtime overrides in deploy)
+
+a_track_position_lifecycle:
+  purpose: "开仓锚定 R/止损/止盈档；持仓期复核；止损只紧不松；每日 B 不默认覆盖止盈阶梯"
+  stop_loss:
+    tighten_only_default: true
+  signal_review:
+    min_technical_score_for_hold: 60
+    consecutive_days_below_before_exit: 3
+    treat_missing_daily_signal_as: "below_threshold"
+  take_profit:
+    daily_b_resets_tp_ladder_default: false
+  minimal_data_interfaces:
+    read_only_positions_api:
+      fields_min:
+        - symbol
+        - side
+        - quantity
+        - entry_price
+        - current_stop_price
+    read_only_last_price:
+      semantics: "mark"

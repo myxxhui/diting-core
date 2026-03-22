@@ -1,6 +1,7 @@
 # [Ref: 02_量化扫描引擎_实践] [Ref: 09_ Module B] QuantSignal 写入 L2：通过表 + 全量表（分开存放）
-# quant_signal_snapshot = 通过阈值的候选（Module C）；quant_signal_scan_all = 全量含当前分数（通过/未通过可查）
+# quant_signal_snapshot = 预警/确认档候选（Module C 默认消费 confirmed）；quant_signal_scan_all = 全量含当前分数（通过/未通过可查）
 
+import json
 import logging
 import uuid
 from typing import Any, List
@@ -56,17 +57,31 @@ def _signal_to_row(signal: Any, batch_id: str, correlation_id: str) -> tuple:
     lt_score = _get_attr(signal, "long_term_score")
     long_term_score = float(lt_score) if lt_score is not None else None
     long_term_candidate = bool(_get_attr(signal, "long_term_candidate", False))
+    signal_tier = str(_get_attr(signal, "signal_tier") or "")[:16]
+    alert_passed = bool(_get_attr(signal, "alert_passed", False))
+    confirmed_passed = bool(_get_attr(signal, "confirmed_passed", _get_attr(signal, "passed", False)))
+    entry_p = _get_attr(signal, "entry_reference_price")
+    stop_p = _get_attr(signal, "stop_loss_price")
+    entry_ref = float(entry_p) if entry_p is not None else None
+    stop_loss = float(stop_p) if stop_p is not None else None
+    tps = _get_attr(signal, "take_profit_prices") or []
+    take_profit_json = json.dumps(list(tps), ensure_ascii=False) if tps else "[]"
+    risk_json = str(_get_attr(signal, "risk_rules_json") or "{}")[:4000]
+    fp = str(_get_attr(signal, "scanner_rules_fingerprint") or "")[:32]
+    ev = str(_get_attr(signal, "evaluation_source") or "FRESH")[:16]
     return (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength,
             trend_score, reversion_score, breakout_score, momentum_score, score_percentile,
-            long_term_score, long_term_candidate, corr)
+            long_term_score, long_term_candidate, corr,
+            signal_tier, alert_passed, confirmed_passed, entry_ref, stop_loss, take_profit_json, risk_json,
+            fp, ev)
 
 
 def _signal_to_scan_all_row(signal: Any, batch_id: str, correlation_id: str) -> tuple:
-    """将单条 QuantSignal 转为 quant_signal_scan_all 行（含 symbol_name、各池得分、截面分位、passed、B轨 long_term）。"""
-    base = _signal_to_row(signal, batch_id, correlation_id)
+    """将单条 QuantSignal 转为 quant_signal_scan_all 行：percentile 后为 passed，再 long_term… 至 risk_json。"""
+    row = _signal_to_row(signal, batch_id, correlation_id)
     passed = bool(_get_attr(signal, "passed", False))
-    # base = (..., long_term_score, long_term_candidate, corr) -> scan_all 在 passed 位置插入
-    return base[:-3] + (passed,) + base[-3:]
+    # row: …21 元组末两项为 fingerprint、evaluation_source
+    return row[:11] + (passed,) + row[11:]
 
 
 def write_quant_signal_snapshot(
@@ -76,11 +91,16 @@ def write_quant_signal_snapshot(
     correlation_id: str = "",
 ) -> int:
     """
-    将本批通过阈值的 QuantSignal 写入 L2 表 quant_signal_snapshot（供 Module C）。
-    :param signals: 仅写入 passed=True 的项；若列表项含 passed 键则过滤，否则视为全部通过
+    将本批「预警或确认」档写入 L2 quant_signal_snapshot（Module C 默认仅用 confirmed_passed）。
+    :param signals: 过滤 confirmed_passed 或 alert_passed（无双档字段时回退 passed=True）
     :return: 写入行数
     """
-    passed_only = [s for s in (signals or []) if _get_attr(s, "passed", True)]
+    def _in_snapshot(s: Any) -> bool:
+        if _get_attr(s, "alert_passed", None) is not None or _get_attr(s, "confirmed_passed", None) is not None:
+            return bool(_get_attr(s, "confirmed_passed", False) or _get_attr(s, "alert_passed", False))
+        return bool(_get_attr(s, "passed", True))
+
+    passed_only = [s for s in (signals or []) if _in_snapshot(s)]
     if not passed_only:
         return 0
     batch_id = batch_id or str(uuid.uuid4())
@@ -101,8 +121,8 @@ def write_quant_signal_snapshot(
             cur.executemany(
                 """
                 INSERT INTO quant_signal_snapshot
-                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, long_term_score, long_term_candidate, correlation_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scanner_rules_fingerprint, evaluation_source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 rows,
             )
@@ -148,8 +168,8 @@ def write_quant_signal_scan_all(
             cur.executemany(
                 """
                 INSERT INTO quant_signal_scan_all
-                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, passed, long_term_score, long_term_candidate, correlation_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, passed, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scanner_rules_fingerprint, evaluation_source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 rows,
             )

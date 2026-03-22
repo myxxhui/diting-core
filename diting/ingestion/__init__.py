@@ -7,6 +7,7 @@ from diting.ingestion.industry_revenue import run_ingest_industry_revenue
 from diting.ingestion.news import run_ingest_news
 from diting.ingestion.universe import run_ingest_universe
 from diting.ingestion.financial import run_ingest_financial
+from diting.ingestion.business_profile import run_ingest_business_profile, run_ingest_business_profile_batch
 
 __all__ = [
     "run_ingest_ohlcv",
@@ -14,4 +15,6 @@ __all__ = [
     "run_ingest_news",
     "run_ingest_universe",
     "run_ingest_financial",
+    "run_ingest_business_profile",
+    "run_ingest_business_profile_batch",
 ]

@@ -30,6 +30,7 @@ from diting.ingestion import (
     run_ingest_universe,
     run_ingest_ohlcv,
     run_ingest_industry_revenue,
+    run_ingest_business_profile,
     run_ingest_news,
 )
 from diting.universe import get_current_a_share_universe, parse_symbol_list_from_env
@@ -85,6 +86,15 @@ def main() -> int:
                 logger.warning("industry_revenue symbol=%s failed: %s", sym, e)
             if delay_sec > 0 and j < len(symbols_ts) - 1:
                 time.sleep(delay_sec)
+
+        if os.environ.get("INGEST_PRODUCTION_BUSINESS_PROFILE", "true").strip().lower() not in ("0", "false", "no"):
+            for j, sym in enumerate(symbols_ts):
+                try:
+                    run_ingest_business_profile(sym)
+                except Exception as e:
+                    logger.warning("business_profile symbol=%s failed: %s", sym, e)
+                if delay_sec > 0 and j < len(symbols_ts) - 1:
+                    time.sleep(delay_sec)
 
         run_ingest_news()
 

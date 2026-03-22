@@ -5,3 +5,5 @@ PyYAML>=6.0
 psycopg2-binary>=2.9.0
 # 技术指标 100% 基于 TA-Lib。系统层 C 库为 0.4.x 时请用 TA-Lib==0.4.28（0.6.x 需 C 库 0.6.x，否则会 undefined symbol）
 TA-Lib>=0.4.28,<0.5
+
+# 可选：Alphalens 因子烟测（make factor-quality-smoke）见 requirements-scanner-alphalens.txt

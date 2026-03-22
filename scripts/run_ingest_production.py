@@ -7,9 +7,10 @@ INGEST_MODE:
   full  — 强制全量：忽略已有数据，全部重新拉取（首次建库 / 数据修复）
 
 各维度增量策略:
-  K 线  — DB 最新日期距今 > INGEST_OHLCV_STALE_DAYS 才补拉，
-          拉取范围 = [max_date - OVERLAP_DAYS, today]
+  K 线  — 按 **交易日** 缺口：相对 as_of（截至今日的最后一根日 K 应对齐的交易日）必须 **零落后**，
+          即 DB 最新日线已覆盖 as_of 则跳过，否则补拉。拉取范围 = [max_date - OVERLAP_DAYS, as_of]
   行业  — updated_at 超过 INGEST_INDUSTRY_REFRESH_DAYS 天重新拉取
+  主营构成 — symbol_business_profile 超过 INGEST_BUSINESS_REFRESH_DAYS 天重新拉取（AkShare stock_zygc_em）
   财务  — updated_at 超过 INGEST_FINANCIAL_REFRESH_DAYS 天重新拉取
   新闻  — INGEST_NEWS_ALWAYS_REFRESH=true 时每次都拉最新（UPSERT 去重）
 """
@@ -42,10 +43,12 @@ from diting.ingestion import (
     run_ingest_universe,
     run_ingest_ohlcv,
     run_ingest_industry_revenue,
+    run_ingest_business_profile,
     run_ingest_news,
     run_ingest_financial,
 )
 from diting.ingestion.config import get_pg_l2_dsn, get_timescale_dsn
+from diting.ingestion.trading_calendar_cn import as_of_trading_session_eod, trading_sessions_gap_after
 from diting.universe import get_current_a_share_universe, parse_symbol_list_from_env
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
@@ -91,16 +94,17 @@ def _get_ingest_mode() -> str:
     return raw if raw in ("auto", "full") else "auto"
 
 
-def _ohlcv_stale_days() -> int:
-    return _env_int("INGEST_OHLCV_STALE_DAYS", 1, 0, 365)
-
-
 def _ohlcv_overlap_days() -> int:
     return _env_int("INGEST_OHLCV_OVERLAP_DAYS", 3, 0, 30)
 
 
 def _industry_refresh_days() -> int:
     return _env_int("INGEST_INDUSTRY_REFRESH_DAYS", 30, 1, 365)
+
+
+def _business_refresh_days() -> int:
+    """主营构成（东方财富披露）刷新周期，默认 120 天（财报季级）。"""
+    return _env_int("INGEST_BUSINESS_REFRESH_DAYS", 120, 1, 365)
 
 
 def _financial_refresh_days() -> int:
@@ -126,7 +130,7 @@ def _news_parallel() -> int:
 
 
 def _ingest_symbol_names() -> bool:
-    """是否在采集时拉取并写入标的中文名到 L2 symbol_names 表。默认 True。"""
+    """是否在采集 ①.5 自动拉取并写入中文名到 L2 symbol_names。INGEST_SYMBOL_NAMES=true/false（或 1/0），默认 true；为 false 时请用 make sync-symbol-names-csv 维护 CSV 后同步。"""
     return _env_bool("INGEST_SYMBOL_NAMES", default=True)
 
 
@@ -275,6 +279,30 @@ def _industry_updated_at_batch(symbols: list) -> dict:
         return {}
 
 
+def _business_updated_at_batch(symbols: list) -> dict:
+    """返回 {symbol: max_updated_at} — 主营构成表最后更新时间。"""
+    if not symbols:
+        return {}
+    syms = [s.strip().upper() for s in symbols if (s or "").strip()]
+    try:
+        conn = _pg_connect(get_pg_l2_dsn)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT symbol, MAX(updated_at)
+                   FROM symbol_business_profile
+                   WHERE symbol = ANY(%s)
+                   GROUP BY symbol""",
+                (syms,),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("查询主营构成 updated_at 失败: %s", e)
+        return {}
+
+
 def _financial_updated_at_batch(symbols: list) -> dict:
     """返回 {symbol: max_updated_at(datetime)} — 财务数据的最后更新时间。"""
     if not symbols:
@@ -326,6 +354,9 @@ def _log_ingest_verify(symbols_full: list, total: int):
     if _ingest_enabled("INDUSTRY_REVENUE"):
         n = len(_industry_updated_at_batch(symbols_full))
         parts.append("行业 %s/%s" % (n, total))
+    if _ingest_enabled("BUSINESS_PROFILE"):
+        n = len(_business_updated_at_batch(symbols_full))
+        parts.append("主营构成 %s/%s" % (n, total))
     if _ingest_enabled("FINANCIAL"):
         n = len(_financial_updated_at_batch(symbols_full))
         parts.append("财务 %s/%s" % (n, total))
@@ -344,7 +375,6 @@ def _decide_ohlcv(sym_key: str, latest_map: dict, mode: str, today: date):
     返回 (should_ingest: bool, start_date: str|None, end_date: str|None, reason: str)
     start_date/end_date 格式 YYYY-MM-DD；None 表示用默认全量回溯。
     """
-    today_str = today.isoformat()
     if mode == "full":
         return True, None, None, "全量模式"
 
@@ -352,15 +382,21 @@ def _decide_ohlcv(sym_key: str, latest_map: dict, mode: str, today: date):
     if latest is None:
         return True, None, None, "无历史数据，全量补录"
 
-    stale = _ohlcv_stale_days()
     overlap = _ohlcv_overlap_days()
-    days_gap = (today - latest).days
+    as_of = as_of_trading_session_eod(today)
+    trading_gap = trading_sessions_gap_after(latest, as_of)
 
-    if days_gap <= stale:
-        return False, None, None, f"数据新鲜（最新 {latest}，距今 {days_gap} 天 <= {stale}）"
+    if trading_gap == 0:
+        return False, None, None, f"数据新鲜（最新 {latest}，已对齐交易日 as_of={as_of}）"
 
+    end_str = as_of.isoformat()
     start = latest - timedelta(days=overlap)
-    return True, start.isoformat(), today_str, f"增量补拉 {start} → {today_str}（缺 {days_gap} 天）"
+    return (
+        True,
+        start.isoformat(),
+        end_str,
+        f"增量补拉 {start.isoformat()} → {end_str}（缺 {trading_gap} 个交易日）",
+    )
 
 
 def _decide_industry(sym_key: str, updated_map: dict, mode: str, now: datetime):
@@ -370,6 +406,22 @@ def _decide_industry(sym_key: str, updated_map: dict, mode: str, now: datetime):
     if ts is None:
         return True, "无历史数据"
     refresh = _industry_refresh_days()
+    if ts.tzinfo is None:
+        age = (now.replace(tzinfo=None) - ts).days
+    else:
+        age = (now - ts).days
+    if age > refresh:
+        return True, f"已过期（{age} 天 > {refresh}）"
+    return False, f"数据新鲜（{age} 天前更新）"
+
+
+def _decide_business(sym_key: str, updated_map: dict, mode: str, now: datetime):
+    if mode == "full":
+        return True, "全量模式"
+    ts = updated_map.get(sym_key)
+    if ts is None:
+        return True, "无历史数据"
+    refresh = _business_refresh_days()
     if ts.tzinfo is None:
         age = (now.replace(tzinfo=None) - ts).days
     else:
@@ -478,11 +530,12 @@ def _ingest_ohlcv_incremental(sym_raw: str, start_str: str, end_str: str) -> int
 def _apply_requests_timeout_patch():
     """进程级补丁：所有 requests 请求默认超时，避免行业/财务/新闻等 akshare 调用卡死。"""
     import requests
-    timeout_sec = 45
+    # 默认 90s：上交所 query.sse.com.cn 代码表等大响应在弱网下易超过 45s；仍可用 INGEST_REQUESTS_TIMEOUT 覆盖
+    timeout_sec = 90
     raw = (os.environ.get("INGEST_REQUESTS_TIMEOUT") or "").strip()
     if raw:
         try:
-            timeout_sec = max(10, min(120, int(raw)))
+            timeout_sec = max(15, min(300, int(raw)))
         except ValueError:
             pass
     _orig_get = requests.get
@@ -498,7 +551,10 @@ def _apply_requests_timeout_patch():
 
     requests.get = _patched_get
     requests.Session.request = _patched_session_request
-    logger.info("已启用 requests 进程级超时: %s 秒（行业/财务/新闻/K线 均生效，可设 INGEST_REQUESTS_TIMEOUT 覆盖）", timeout_sec)
+    logger.info(
+        "已启用 requests 进程级超时: %s 秒（akshare/东方财富/上交所等；可设 INGEST_REQUESTS_TIMEOUT 覆盖，建议弱网 ≥90）",
+        timeout_sec,
+    )
 
 
 def main() -> int:
@@ -528,7 +584,13 @@ def main() -> int:
         logger.info("刷新全 A 股 universe")
         run_ingest_universe()
 
-    need = _ingest_enabled("OHLCV") or _ingest_enabled("INDUSTRY_REVENUE") or _ingest_enabled("NEWS") or _ingest_enabled("FINANCIAL")
+    need = (
+        _ingest_enabled("OHLCV")
+        or _ingest_enabled("INDUSTRY_REVENUE")
+        or _ingest_enabled("BUSINESS_PROFILE")
+        or _ingest_enabled("NEWS")
+        or _ingest_enabled("FINANCIAL")
+    )
     if not need:
         logger.info("所有维度均已关闭，无需采集")
         return 0
@@ -541,33 +603,76 @@ def main() -> int:
     total = len(symbols_raw)
     logger.info("标的总数: %s 只", total)
 
-    # ①.5 标的中文名：从 akshare 拉取当前标的池名称并写入 L2 symbol_names（B 模块/扫描器用）
+    # ①.5 标的中文名：写入 L2 symbol_names（默认东方财富个股接口；INGEST_SYMBOL_NAMES_MODE=akshare_bulk 可切回全表）
     if _ingest_symbol_names():
         try:
-            from diting.scanner.symbol_names import _fetch_from_akshare, _save_to_db
+            from diting.scanner.symbol_names import (
+                _fetch_from_akshare,
+                _fetch_names_eastmoney_individual,
+                _save_to_db,
+                symbols_missing_name_cn,
+            )
+
             dsn = get_pg_l2_dsn()
-            if dsn:
-                names = _fetch_from_akshare(symbols_full)
-                if names:
-                    _save_to_db(dsn, names, "akshare")
-                    logger.info("已拉取并写入标的中文名 %s 条到 L2 symbol_names", len(names))
+            if not dsn:
+                logger.info("①.5 标的中文名: 跳过（未配置 PG_L2_DSN）")
+            else:
+                missing = symbols_missing_name_cn(dsn, list(symbols_full))
+                if not missing:
+                    logger.info(
+                        "①.5 标的中文名: 跳过拉取（L2 已覆盖当前标的池全部 %s 只）",
+                        total,
+                    )
                 else:
-                    logger.debug("未拉取到标的中文名（akshare 可能不可用）")
+                    names_mode = (os.environ.get("INGEST_SYMBOL_NAMES_MODE") or "eastmoney").strip().lower()
+                    if names_mode == "akshare_bulk":
+                        logger.info(
+                            "①.5 标的中文名: L2 待补 %s/%s 只，使用 akshare 全表模式（易大响应断连，慎用）",
+                            len(missing),
+                            total,
+                        )
+                        names = _fetch_from_akshare(missing)
+                        src = "akshare"
+                    else:
+                        logger.info(
+                            "①.5 标的中文名: L2 待补 %s/%s 只，使用东方财富个股接口（与 K 线同源）",
+                            len(missing),
+                            total,
+                        )
+                        names = _fetch_names_eastmoney_individual(missing)
+                        src = "eastmoney_em"
+                    if names:
+                        logger.info("①.5 标的中文名: 写入 L2 共 %s 条…", len(names))
+                        _save_to_db(dsn, names, src)
+                        logger.info(
+                            "已拉取并写入标的中文名 %s 条到 L2 symbol_names（source=%s）",
+                            len(names),
+                            src,
+                        )
+                    else:
+                        logger.info(
+                            "①.5 标的中文名: 无可写入条目（远程无匹配或不可用），跳过落库",
+                        )
         except Exception as e:
             logger.warning("拉取/写入标的中文名失败（不影响后续采集）: %s", e)
+    else:
+        logger.info("①.5 标的中文名: 跳过（INGEST_SYMBOL_NAMES 已关闭）")
 
-    # ② 增量状态：4 个维度并行批量查询（一次 round-trip 完成）
+    # ② 增量状态：多维度并行批量查询（一次 round-trip 完成）
     logger.info("正在检测各维度数据状态（%s 只标的，并行查询 L1/L2）…", total)
-    ohlcv_latest, industry_updated, financial_updated, news_latest = {}, {}, {}, {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    ohlcv_latest, industry_updated, business_updated, financial_updated, news_latest = {}, {}, {}, {}, {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
         f_ohlcv = ex.submit(_ohlcv_latest_dates_batch, symbols_full) if _ingest_enabled("OHLCV") else None
         f_ind = ex.submit(_industry_updated_at_batch, symbols_full) if _ingest_enabled("INDUSTRY_REVENUE") else None
+        f_bp = ex.submit(_business_updated_at_batch, symbols_full) if _ingest_enabled("BUSINESS_PROFILE") else None
         f_fin = ex.submit(_financial_updated_at_batch, symbols_full) if _ingest_enabled("FINANCIAL") else None
         f_news = ex.submit(_news_latest_dates_batch, symbols_full) if _ingest_enabled("NEWS") else None
         if f_ohlcv:
             ohlcv_latest = f_ohlcv.result()
         if f_ind:
             industry_updated = f_ind.result()
+        if f_bp:
+            business_updated = f_bp.result()
         if f_fin:
             financial_updated = f_fin.result()
         if f_news:
@@ -604,14 +709,14 @@ def main() -> int:
     if _separate_phases():
         _run_phases_separate(
             symbols_raw, symbols_full, total, mode, today, now,
-            ohlcv_latest, industry_updated, financial_updated, news_latest,
+            ohlcv_latest, industry_updated, business_updated, financial_updated, news_latest,
             days_back, unified_start, unified_end, news_days,
             delay_sec, batch_size, batch_pause,
         )
     else:
         _run_phases_combined(
             symbols_raw, symbols_full, total, mode, today, now,
-            ohlcv_latest, industry_updated, financial_updated, news_latest,
+            ohlcv_latest, industry_updated, business_updated, financial_updated, news_latest,
             days_back, unified_start, unified_end, news_days,
             delay_sec, batch_size, batch_pause,
         )
@@ -628,7 +733,7 @@ def main() -> int:
 
 def _run_phases_separate(
     symbols_raw, symbols_full, total, mode, today, now,
-    ohlcv_latest, industry_updated, financial_updated, news_latest,
+    ohlcv_latest, industry_updated, business_updated, financial_updated, news_latest,
     days_back, unified_start, unified_end, news_days,
     delay_sec, batch_size, batch_pause,
 ):
@@ -696,6 +801,34 @@ def _run_phases_separate(
             logger.info("阶段间暂停 %.0fs", phase_pause)
             time.sleep(phase_pause)
 
+    # Phase 2.3: 主营构成（东方财富 disclosure → L2 symbol_business_profile）
+    if _ingest_enabled("BUSINESS_PROFILE"):
+        logger.info("=" * 50)
+        logger.info("Phase 2.3: 主营构成 → L2（%s 只）", total)
+        logger.info("=" * 50)
+        cnt_done, cnt_skip = 0, 0
+        for j, sym_full in enumerate(symbols_full):
+            sym_key = sym_full.strip().upper()
+            remaining = total - (j + 1)
+            should, reason = _decide_business(sym_key, business_updated, mode, now)
+            if not should:
+                cnt_skip += 1
+                if j < 3 or (j + 1) == total:
+                    logger.info("  [%s/%s] 剩余 %s 只 | %s 跳过: %s", j + 1, total, remaining, sym_full, reason)
+                continue
+            logger.info("  [%s/%s] 剩余 %s 只 | %s 采集: %s", j + 1, total, remaining, sym_full, reason)
+            try:
+                run_ingest_business_profile(sym_full)
+                cnt_done += 1
+            except Exception as e:
+                logger.warning("  [%s/%s] %s 失败: %s", j + 1, total, sym_full, e)
+            if delay_sec > 0 and j < total - 1:
+                time.sleep(delay_sec)
+        logger.info("Phase 2.3 完成: 采集 %s 只，跳过 %s 只", cnt_done, cnt_skip)
+        if phase_pause > 0:
+            logger.info("阶段间暂停 %.0fs", phase_pause)
+            time.sleep(phase_pause)
+
     # Phase 2.5: 财务报表
     if _ingest_enabled("FINANCIAL"):
         logger.info("=" * 50)
@@ -757,7 +890,7 @@ def _run_phases_separate(
 
 def _run_phases_combined(
     symbols_raw, symbols_full, total, mode, today, now,
-    ohlcv_latest, industry_updated, financial_updated, news_latest,
+    ohlcv_latest, industry_updated, business_updated, financial_updated, news_latest,
     days_back, unified_start, unified_end, news_days,
     delay_sec, batch_size, batch_pause,
 ):
@@ -789,6 +922,7 @@ def _run_phases_combined(
         need_ohlcv_full = set()
         need_ohlcv_inc = {}  # sym_raw -> (inc_start, inc_end)
         need_industry = set()
+        need_business = set()
         need_financial = set()
         need_news = set()
         for sym_raw, sym_full in zip(batch_raw, batch_full):
@@ -802,6 +936,8 @@ def _run_phases_combined(
                         need_ohlcv_full.add(sym_raw)
             if _ingest_enabled("INDUSTRY_REVENUE") and _decide_industry(sym_key, industry_updated, mode, now)[0]:
                 need_industry.add(sym_full)
+            if _ingest_enabled("BUSINESS_PROFILE") and _decide_business(sym_key, business_updated, mode, now)[0]:
+                need_business.add(sym_full)
             if _ingest_enabled("FINANCIAL") and _decide_financial(sym_key, financial_updated, mode, now)[0]:
                 need_financial.add(sym_full)
             if _ingest_enabled("NEWS") and _decide_news(sym_key, news_latest, mode, now)[0]:
@@ -811,8 +947,10 @@ def _run_phases_combined(
         for j, (sym_raw, sym_full) in enumerate(zip(batch_raw, batch_full)):
             current_global = start_idx + j + 1
             remaining = total - current_global
+            sym_key = sym_full.strip().upper()
             did_ohlcv = False
             did_industry = False
+            did_business = False
             did_financial = False
             did_news = False
 
@@ -837,6 +975,13 @@ def _run_phases_combined(
                 except Exception as e:
                     logger.warning("行业 %s 失败: %s", sym_full, e)
 
+            if sym_full in need_business:
+                try:
+                    run_ingest_business_profile(sym_full)
+                    did_business = True
+                except Exception as e:
+                    logger.warning("主营构成 %s 失败: %s", sym_full, e)
+
             if sym_full in need_financial:
                 try:
                     run_ingest_financial(sym_full)
@@ -860,6 +1005,8 @@ def _run_phases_combined(
                 parts.append("K线")
             if did_industry:
                 parts.append("行业")
+            if did_business:
+                parts.append("主营构成")
             if did_financial:
                 parts.append("财务")
             if did_news:

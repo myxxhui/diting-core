@@ -20,7 +20,7 @@ _DOMAIN_TAG_TO_STR = {
 
 
 def _output_to_row(output: Any, batch_id: str, correlation_id: str) -> tuple:
-    """将单条 ClassifierOutput 转为 (batch_id, symbol, primary_tag, primary_confidence, tags_json, correlation_id)."""
+    """将单条 ClassifierOutput 转为行元组（含 segment_shares_json）。"""
     primary_tag = "未知"
     primary_confidence = 0.0
     tags_list = []
@@ -35,11 +35,27 @@ def _output_to_row(output: Any, batch_id: str, correlation_id: str) -> tuple:
             tag_val = t0["domain_tag"]
             primary_tag = _DOMAIN_TAG_TO_STR.get(tag_val, "未知")
             if tag_val == 5 and t0.get("domain_label"):
-                primary_tag = (t0["domain_label"] or "")[:16] or "自定义"
+                primary_tag = ((t0["domain_label"] or "")[:64] or "自定义")
             primary_confidence = t0.get("confidence", 0.0)
     tags_json = json.dumps(tags_list, ensure_ascii=False) if tags_list else None
     symbol = getattr(output, "symbol", "") or ""
-    return (batch_id, symbol, primary_tag, primary_confidence, tags_json, correlation_id)
+    seg_shares = getattr(output, "segment_shares", None) or []
+    def _seg_row(s: Any) -> dict:
+        sid = getattr(s, "segment_id", "") or ""
+        row = {
+            "segment_id": sid,
+            "revenue_share": float(getattr(s, "revenue_share", 0) or 0),
+            "is_primary": bool(getattr(s, "is_primary", False)),
+            # 与 L2 主营表是否一致：seg_no_disclosure 表示无 symbol_business_profile 行
+            "disclosure_present": sid != "seg_no_disclosure",
+        }
+        return row
+
+    segment_shares_json = json.dumps(
+        [_seg_row(s) for s in seg_shares],
+        ensure_ascii=False,
+    ) if seg_shares else "[]"
+    return (batch_id, symbol, primary_tag, primary_confidence, tags_json, segment_shares_json, correlation_id)
 
 
 def write_classifier_output_snapshot(
@@ -69,18 +85,39 @@ def write_classifier_output_snapshot(
 
     rows = [_output_to_row(o, batch_id, correlation_id) for o in outputs]
 
+    insert_sql = """
+                INSERT INTO classifier_output_snapshot
+                (batch_id, symbol, primary_tag, primary_confidence, tags_json, segment_shares_json, correlation_id)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                """
+
+    def _missing_segment_column(err: BaseException) -> bool:
+        msg = str(err).lower()
+        return "segment_shares_json" in msg and (
+            "does not exist" in msg or "undefinedcolumn" in msg.replace(" ", "")
+        )
+
     try:
         conn = psycopg2.connect(dsn)
         try:
             cur = conn.cursor()
-            cur.executemany(
-                """
-                INSERT INTO classifier_output_snapshot
-                (batch_id, symbol, primary_tag, primary_confidence, tags_json, correlation_id)
-                VALUES (%s, %s, %s, %s, %s::jsonb, %s)
-                """,
-                rows,
-            )
+            try:
+                cur.executemany(insert_sql, rows)
+            except Exception as e:
+                if _missing_segment_column(e):
+                    logger.info(
+                        "classifier_output_snapshot 缺 segment_shares_json 列，执行 ADD COLUMN 后重试写入"
+                    )
+                    cur.execute(
+                        """
+                        ALTER TABLE classifier_output_snapshot
+                        ADD COLUMN IF NOT EXISTS segment_shares_json JSONB;
+                        """
+                    )
+                    conn.commit()
+                    cur.executemany(insert_sql, rows)
+                else:
+                    raise
             conn.commit()
             n = len(rows)
             logger.info("ClassifierOutput 写入 L2 表 classifier_output_snapshot: batch_id=%s, 行数=%s", batch_id, n)

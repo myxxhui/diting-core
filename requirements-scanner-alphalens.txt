@@ -1,0 +1,13 @@
+# Alphalens 因子分层烟测（make factor-quality-smoke）可选依赖
+# 安装：pip install -r requirements-scanner-alphalens.txt
+# 须与 TA-Lib 同环境时：numpy 保持 <2（见 requirements-scanner.txt）
+#
+# Peewee 说明（最佳实践）：
+# - empyrical-reloaded 在包元数据中声明 peewee<3.17.4，pip 会装 peewee 3.17.x；其源码未 import peewee，属历史/声明冗余。
+# - 若本机其他项目强依赖 peewee 4+：优先使用独立 venv；若必须同环境，可在装完本文件后执行
+#   pip install 'peewee>=4'
+#   pip 会提示与 empyrical-reloaded 声明冲突，但因子烟测与 alphalens 导入通常仍正常（以本仓库 make factor-quality-smoke 为准）。
+# - 不推荐在无需求时强行升级 peewee，以免未来 empyrical 若真依赖旧 API 时踩坑。
+
+alphalens-reloaded>=0.4.5
+numpy>=1.26,<2

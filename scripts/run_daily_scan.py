@@ -4,10 +4,12 @@
 # 工作目录: diting-core
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
+ROOT = str(root)
 if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
@@ -32,6 +34,14 @@ def main() -> int:
         classifier_results = SemanticClassifier.run_full(universe=universe)
         scanner_results = QuantScanner.run_full(universe=universe)
         logger.info("run_daily_scan: Module A classified %s, Module B signals %s", len(classifier_results), len(scanner_results))
+        if os.environ.get("RUN_MODULE_C", "").strip().lower() in ("1", "true", "yes"):
+            import subprocess
+            rc = subprocess.call(
+                [sys.executable, str(Path(ROOT) / "scripts" / "run_module_c_local.py")],
+                cwd=ROOT,
+                env={**os.environ, "MOE_STUB_SEGMENT_SIGNALS": os.environ.get("MOE_STUB_SEGMENT_SIGNALS", "1")},
+            )
+            logger.info("run_daily_scan: Module C exit_code=%s", rc)
         return 0
     except Exception as e:
         logger.exception("run_daily_scan failed: %s", e)

@@ -36,6 +36,46 @@ def _load_moe_config() -> Dict[str, Any]:
     return _CONFIG_CACHE
 
 
+def resolve_router_domain_tag(
+    domain_tags: Optional[List[str]],
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    与 route_and_collect_opinions 短轨入口一致：返回进入 unified_opinion 的 domain_tag（农业/科技/宏观）；
+    None 表示无可用映射（将产生垃圾箱意见）。供 CLI/报表展示，避免与 Router 逻辑分叉。
+    """
+    cfg = config if config is not None else _load_moe_config()
+    moe = cfg.get("moe_router") or cfg
+    supported = moe.get("supported_tags") or ["农业", "科技", "宏观"]
+    tag_to_router = moe.get("tag_to_router_domain") or {}
+    if not isinstance(tag_to_router, dict):
+        tag_to_router = {}
+    _raw_um = moe.get("unmapped_router_domain")
+    unmapped: Optional[str] = None
+    if isinstance(_raw_um, str) and _raw_um.strip():
+        unmapped = _raw_um.strip()
+
+    first_supported_tag: Optional[str] = None
+    for tag in domain_tags or []:
+        t = (tag if isinstance(tag, str) else "").strip()
+        if not t:
+            continue
+        if t in supported:
+            first_supported_tag = t
+            break
+        mapped = tag_to_router.get(t)
+        if isinstance(mapped, str):
+            m = mapped.strip()
+            if m in supported:
+                first_supported_tag = m
+                break
+
+    if first_supported_tag is None and unmapped and unmapped in supported:
+        first_supported_tag = unmapped
+
+    return first_supported_tag
+
+
 def route_and_collect_opinions(
     symbol: str,
     quant_signal: Optional[Dict[str, Any]] = None,
@@ -48,15 +88,14 @@ def route_and_collect_opinions(
     """
     按股配置 + 统一分析：每标的一条意见。
     - 若 enable_vc_agent 且 quant_signal 为 long_term_candidate，可追加 VC-Agent 意见（LONG_TERM）。
-    - 短轨：domain_tags 中首个在 supported_tags 的 tag 走 unified_opinion；否则返回一条「不支持」。
+    - 短轨：domain_tags 中首个命中 supported_tags 的标签走 unified_opinion；否则查 moe_router.tag_to_router_domain；
+      仍无则可选 unmapped_router_domain；皆无则返回一条「不支持」。
     """
     opinions: List[ExpertOpinion] = []
     quant_signal = quant_signal or {}
     segment_list = segment_list or []
     segment_signals = segment_signals or {}
     cfg = config if config is not None else _load_moe_config()
-    moe = cfg.get("moe_router") or cfg
-    supported = moe.get("supported_tags") or ["农业", "科技", "宏观"]
 
     if enable_vc_agent and quant_signal.get("long_term_candidate"):
         try:
@@ -66,12 +105,7 @@ def route_and_collect_opinions(
         except Exception as e:
             logger.warning("VC-Agent 占位调用异常: %s", e)
 
-    first_supported_tag: Optional[str] = None
-    for tag in domain_tags or []:
-        t = (tag if isinstance(tag, str) else "").strip()
-        if t in supported:
-            first_supported_tag = t
-            break
+    first_supported_tag = resolve_router_domain_tag(domain_tags, cfg)
 
     if first_supported_tag is None:
         opinions.append(trash_bin_opinion(symbol, reason="无法归类或未映射标签"))

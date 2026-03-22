@@ -22,10 +22,20 @@ class TagWithConfidence:
         self.domain_label = domain_label or ""  # 自定义类别展示名
 
 
-class ClassifierOutput:
-    """Module A 输出：symbol + tags（Domain Tag 列表 + 置信度），可被 B/D 消费。"""
+class SegmentShare:
+    """主营/细分占比，供 Module C 对齐与加权（[Ref: 12_右脑数据支撑与Segment规约]）。"""
 
-    def __init__(self, symbol="", tags=None, correlation_id=""):
+    def __init__(self, segment_id="", revenue_share=0.0, is_primary=False):
+        self.segment_id = str(segment_id or "").strip()
+        self.revenue_share = float(revenue_share)
+        self.is_primary = bool(is_primary)
+
+
+class ClassifierOutput:
+    """Module A 输出：symbol + tags + segment_shares（细分列表），可被 B/C/D 消费。"""
+
+    def __init__(self, symbol="", tags=None, correlation_id="", segment_shares=None):
         self.symbol = symbol
         self.tags = list(tags) if tags else []
         self.correlation_id = correlation_id or ""
+        self.segment_shares = list(segment_shares) if segment_shares else []

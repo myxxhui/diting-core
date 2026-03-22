@@ -95,10 +95,15 @@ def _get_optimization_params() -> Dict[str, Any]:
         return _DEFAULT_OPTIMIZATION
 
 
-def evaluate_trend(open_: Any, high: Any, low: Any, close: Any, volume: Any) -> float:
+def evaluate_trend(
+    open_: Any, high: Any, low: Any, close: Any, volume: Any,
+    opt: Optional[Dict[str, Any]] = None,
+) -> float:
     """趋势池：均线子分(0–50) + MACD 子分(0–50)，cap 100。ADX 弱趋势降权；部分确认(2/3)给比例分。"""
     if not indicators.has_talib():
         return 0.0
+    if opt is None:
+        opt = _get_optimization_params()
     ma5 = indicators.ma(close, 5)
     ma10 = indicators.ma(close, 10)
     ma20 = indicators.ma(close, 20)
@@ -107,7 +112,6 @@ def evaluate_trend(open_: Any, high: Any, low: Any, close: Any, volume: Any) -> 
     if not macd_res or not ma5 or not ma10 or not ma20 or not ma60:
         return 0.0
     macd_line, signal_line, _ = macd_res
-    opt = _get_optimization_params()
     confirm_bars = opt.get("trend_confirm_bars", 3)
     need_confirm = confirm_bars > 1 and len(ma5) >= confirm_bars
     partial_confirm_enabled = opt.get("trend_partial_confirm_enabled", True)
@@ -179,10 +183,15 @@ def evaluate_trend(open_: Any, high: Any, low: Any, close: Any, volume: Any) -> 
     return min(100.0, raw)
 
 
-def evaluate_reversion(open_: Any, high: Any, low: Any, close: Any, volume: Any) -> float:
+def evaluate_reversion(
+    open_: Any, high: Any, low: Any, close: Any, volume: Any,
+    opt: Optional[Dict[str, Any]] = None,
+) -> float:
     """反转池：RSI 扩展区间 [oversold, soft_ceiling] 连续子分 + 布林下轨；放量止跌加成；止跌 close>MA5。"""
     if not indicators.has_talib():
         return 0.0
+    if opt is None:
+        opt = _get_optimization_params()
     rsi_vals = indicators.rsi(close, 14)
     bb = indicators.bbands(close, 20, 2.0, 2.0)
     ma5 = indicators.ma(close, 5)
@@ -195,7 +204,6 @@ def evaluate_reversion(open_: Any, high: Any, low: Any, close: Any, volume: Any)
     if r is None or c_last is None or l_last is None or l_last <= 0:
         return 0.0
     params = _get_scoring_params()
-    opt = _get_optimization_params()
     rsi_oversold = params.get("reversion", {}).get("rsi_oversold", 20)
     rsi_soft_ceiling = params.get("reversion", {}).get("rsi_soft_ceiling", 35)
     if r < rsi_oversold:
@@ -242,15 +250,19 @@ def evaluate_reversion(open_: Any, high: Any, low: Any, close: Any, volume: Any)
     return raw
 
 
-def evaluate_breakout(open_: Any, high: Any, low: Any, close: Any, volume: Any) -> float:
+def evaluate_breakout(
+    open_: Any, high: Any, low: Any, close: Any, volume: Any,
+    opt: Optional[Dict[str, Any]] = None,
+) -> float:
     """突破池：价格突破子分(0–50) 按 ATR 归一化 + 放量子分(0–50)，cap 100；最近 2 根至少 2 根满足。"""
     if not indicators.has_talib():
         return 0.0
+    if opt is None:
+        opt = _get_optimization_params()
     max_h = indicators.max_high(high, 20)
     vol_sma = indicators.sma_volume(volume, 20)
     if not max_h or not vol_sma or len(max_h) < 22 or len(vol_sma) < 21:
         return 0.0
-    opt = _get_optimization_params()
     confirm_bars = opt.get("breakout_confirm_bars", 2)
     need_confirm = confirm_bars >= 2 and len(max_h) >= confirm_bars
 
@@ -324,11 +336,13 @@ def evaluate_breakout(open_: Any, high: Any, low: Any, close: Any, volume: Any) 
 def evaluate_momentum(
     open_: Any, high: Any, low: Any, close: Any, volume: Any,
     momentum_20d_percentile: Optional[float] = None,
+    opt: Optional[Dict[str, Any]] = None,
 ) -> float:
     """动量池（第四池）：20 日收益率分位子分(0–50) + close>MA20 子分(0–50)，cap 100。"""
     if not indicators.has_talib():
         return 0.0
-    opt = _get_optimization_params()
+    if opt is None:
+        opt = _get_optimization_params()
     if not opt.get("pool_4_momentum_enabled"):
         return 0.0
     ma20 = indicators.ma(close, 20)
@@ -357,18 +371,38 @@ def evaluate_momentum(
     return min(100.0, return_sub + ma_sub)
 
 
+def _merge_opt(override: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    base = _get_optimization_params()
+    if not override:
+        return base
+    out = dict(base)
+    for k, v in override.items():
+        out[k] = v
+    return out
+
+
 def evaluate_pools(
     open_: Any, high: Any, low: Any, close: Any, volume: Any,
     momentum_20d_percentile: Optional[float] = None,
+    optimization_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, int, int, float, Dict[int, float]]:
     """多池连续得分；默认加权融合 w1*s1+w2*s2+w3*s3；多池共振加成；返回 technical_score, strategy_source, second_pool_id, second_pool_score, pool_scores。"""
-    t = evaluate_trend(open_, high, low, close, volume)
-    r = evaluate_reversion(open_, high, low, close, volume)
-    b = evaluate_breakout(open_, high, low, close, volume)
+    opt = _merge_opt(optimization_override)
+    t = evaluate_trend(open_, high, low, close, volume, opt=opt)
+    mult = float(opt.get("index_regime_trend_mult", 1.0))
+    if mult != 1.0:
+        t = min(100.0, max(0.0, t * mult))
+    r = evaluate_reversion(open_, high, low, close, volume, opt=opt)
+    b = evaluate_breakout(open_, high, low, close, volume, opt=opt)
+    br_m = float(opt.get("index_regime_breakout_mult", 1.0))
+    rev_m = float(opt.get("index_regime_reversion_mult", 1.0))
+    if br_m != 1.0:
+        b = min(100.0, max(0.0, b * br_m))
+    if rev_m != 1.0:
+        r = min(100.0, max(0.0, r * rev_m))
     scores = [(t, POOL_TREND), (r, POOL_REVERSION), (b, POOL_BREAKOUT)]
-    opt = _get_optimization_params()
     if opt.get("pool_4_momentum_enabled"):
-        m = evaluate_momentum(open_, high, low, close, volume, momentum_20d_percentile)
+        m = evaluate_momentum(open_, high, low, close, volume, momentum_20d_percentile, opt=opt)
         scores.append((m, POOL_MOMENTUM))
     sorted_scores = sorted(scores, key=lambda x: -x[0])
     best = sorted_scores[0]

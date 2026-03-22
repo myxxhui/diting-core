@@ -9,8 +9,8 @@ from diting.moe.alignment import (
     should_reject_by_cognitive_boundary,
 )
 from diting.moe.experts import unified_opinion, trash_bin_opinion
-from diting.moe.router import route_and_collect_opinions
-from diting.protocols.brain_pb2 import ExpertOpinion
+from diting.moe.router import resolve_router_domain_tag, route_and_collect_opinions
+from diting.protocols.brain_pb2 import ExpertOpinion, TIME_HORIZON_SHORT_TERM
 
 
 # ----- 契约 100% -----
@@ -141,10 +141,57 @@ def test_unified_opinion_primary_bullish_is_supported_true():
     assert op.is_supported is True
     assert op.confidence >= 0.5
     assert op.domain == 1
+    assert op.horizon == TIME_HORIZON_SHORT_TERM
     assert "对齐得分=" in op.reasoning_summary
     assert "景气强度=" in op.reasoning_summary
     assert "风险等级=" in op.reasoning_summary
     assert "利好强度=" in op.reasoning_summary
+
+
+def test_unified_opinion_require_quant_passed_blocks():
+    seg_list = [{"segment_id": "agri_pork", "revenue_share": 0.9, "is_primary": True}]
+    signals = {"agri_pork": {"direction": "bullish", "strength": 0.85, "risk_tags": []}}
+    cfg = {
+        "moe_router": {
+            "require_quant_passed": True,
+            "alignment": {},
+            "multi_segment": {},
+            "signal_parse": {},
+        }
+    }
+    op = unified_opinion(
+        "000998.SZ",
+        {"confirmed_passed": False, "passed": False, "alert_passed": False},
+        seg_list,
+        signals,
+        cfg,
+        domain_tag="农业",
+    )
+    assert op.is_supported is False
+    assert "量化" in op.reasoning_summary or "门控" in op.reasoning_summary
+
+
+def test_unified_opinion_require_quant_passed_allows_alert_tier():
+    """与 B snapshot 一致：仅预警档也应通过量化门。"""
+    seg_list = [{"segment_id": "agri_pork", "revenue_share": 0.9, "is_primary": True}]
+    signals = {"agri_pork": {"direction": "bullish", "strength": 0.85, "risk_tags": []}}
+    cfg = {
+        "moe_router": {
+            "require_quant_passed": True,
+            "alignment": {},
+            "multi_segment": {},
+            "signal_parse": {},
+        }
+    }
+    op = unified_opinion(
+        "000998.SZ",
+        {"confirmed_passed": False, "passed": False, "alert_passed": True},
+        seg_list,
+        signals,
+        cfg,
+        domain_tag="农业",
+    )
+    assert op.is_supported is True
 
 
 def test_trash_bin_opinion():
@@ -206,6 +253,52 @@ def test_router_unknown_tag_trash_bin():
     assert len(opinions) == 1
     assert opinions[0].is_supported is False
     assert "无法归类" in opinions[0].reasoning_summary or "未映射" in opinions[0].reasoning_summary
+
+
+def test_resolve_router_domain_tag_matches_router():
+    assert resolve_router_domain_tag(["半导体"], None) == "科技"
+    assert resolve_router_domain_tag(["宏观"], None) == "宏观"
+    cfg = {"moe_router": {"supported_tags": ["农业", "科技", "宏观"], "tag_to_router_domain": {}, "unmapped_router_domain": "科技"}}
+    assert resolve_router_domain_tag(["不存在行业"], cfg) == "科技"
+
+
+def test_router_tag_to_router_domain_maps_custom_label():
+    """config/moe_router.yaml 将「半导体」等映射到 科技/宏观 等。"""
+    opinions = route_and_collect_opinions(
+        "688012.SH",
+        quant_signal={},
+        domain_tags=["半导体"],
+        segment_list=[{"segment_id": "semi", "revenue_share": 0.9, "is_primary": True}],
+        segment_signals={"semi": {"direction": "bullish", "strength": 0.7}},
+        enable_vc_agent=False,
+    )
+    assert len(opinions) == 1
+    assert opinions[0].is_supported is True
+    assert opinions[0].domain == 2
+
+
+def test_router_unmapped_router_domain_in_config():
+    cfg = {
+        "moe_router": {
+            "supported_tags": ["农业", "科技", "宏观"],
+            "tag_to_router_domain": {},
+            "unmapped_router_domain": "科技",
+            "risk_factor_templates": {"科技": ["研发不及预期"]},
+            "alignment": {"primary_weight": 0.6, "other_weight": 0.4, "veto_threshold": 0.3},
+            "multi_segment": {"primary_veto": True, "risk_discount": 0.5},
+        }
+    }
+    opinions = route_and_collect_opinions(
+        "000001.SZ",
+        quant_signal={},
+        domain_tags=["未在表中出现的行业名"],
+        segment_list=[{"segment_id": "x", "revenue_share": 0.9, "is_primary": True}],
+        segment_signals={"x": {"direction": "bullish", "strength": 0.7}},
+        enable_vc_agent=False,
+        config=cfg,
+    )
+    assert len(opinions) == 1
+    assert opinions[0].is_supported is True
 
 
 def test_router_no_domain_tags_returns_one_unsupported():

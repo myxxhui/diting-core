@@ -1,6 +1,12 @@
 # [Ref: 03_原子目标与规约/_共享规约/04_全链路通信协议矩阵] 占位，替代 protoc 生成
 # 正式流程：design/protocols/brain/expert.proto -> protoc -> 本模块
 
+# TimeHorizon：与 expert.proto 一致；A 轨统一分析为 SHORT_TERM，VC-Agent 为 LONG_TERM
+TIME_HORIZON_UNSPECIFIED = 0
+TIME_HORIZON_SHORT_TERM = 1
+TIME_HORIZON_LONG_TERM = 2
+
+
 class ExpertOpinion:
     def __init__(self, symbol="", domain=0, is_supported=False, direction=0,
                  confidence=0.0, reasoning_summary="", risk_factors=None, timestamp=0, horizon=0):

@@ -4,12 +4,10 @@
 import logging
 from typing import Any, Dict, Optional
 
-from diting.protocols.brain_pb2 import ExpertOpinion
+from diting.protocols.brain_pb2 import ExpertOpinion, TIME_HORIZON_LONG_TERM
 
 logger = logging.getLogger(__name__)
 
-# expert.proto TimeHorizon: 0=UNSPECIFIED, 1=SHORT_TERM, 2=LONG_TERM
-TIME_HORIZON_LONG_TERM = 2
 SIGNAL_BULLISH = 1
 
 
@@ -31,5 +29,5 @@ def vc_agent_opinion(
         reasoning_summary="VC-Agent 占位：长期价值候选，待接入基本面与逻辑证伪",
         risk_factors=[],
         timestamp=0,
-        horizon=TIME_HORIZON_LONG_TERM if enable_long_term else 1,
+        horizon=TIME_HORIZON_LONG_TERM if enable_long_term else 1,  # noqa: short=1
     )

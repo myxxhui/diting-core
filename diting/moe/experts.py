@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from diting.protocols.brain_pb2 import ExpertOpinion
+from diting.protocols.brain_pb2 import ExpertOpinion, TIME_HORIZON_SHORT_TERM
 
 from diting.moe.alignment import (
     RISK_LEVEL_DISCOUNT,
@@ -69,8 +69,10 @@ def _build_opinion(
     confidence: float,
     reasoning_summary: str,
     risk_factors: List[str],
-    horizon: int = 0,
+    horizon: int = None,
 ) -> ExpertOpinion:
+    if horizon is None:
+        horizon = TIME_HORIZON_SHORT_TERM
     return ExpertOpinion(
         symbol=symbol,
         domain=domain,
@@ -98,6 +100,23 @@ def unified_opinion(
     """
     config = config or {}
     routing = config.get("moe_router") or config
+    # 与 B 侧写入 quant_signal_snapshot 一致：确认档或预警档即视为左脑量化门可用（非仅 confirmed）
+    if routing.get("require_quant_passed") and quant_signal:
+        qp = (
+            bool(quant_signal.get("confirmed_passed"))
+            or bool(quant_signal.get("passed"))
+            or bool(quant_signal.get("alert_passed"))
+        )
+        if not qp:
+            return _build_opinion(
+                symbol,
+                _DOMAIN_TAG_TO_ENUM.get(domain_tag, DOMAIN_AGRI),
+                False,
+                SIGNAL_NEUTRAL,
+                0.0,
+                "量化侧未进入确认档或预警档（require_quant_passed=true）；右脑不予支持",
+                ["量化门控"],
+            )
     align_cfg = routing.get("alignment", {})
     multi_cfg = routing.get("multi_segment", {})
     parse_cfg = routing.get("signal_parse", {})
@@ -168,4 +187,4 @@ def unified_opinion(
 
 def trash_bin_opinion(symbol: str, reason: str = "无法归类，逻辑不清") -> ExpertOpinion:
     """无法归类或未在 supported_tags 时，输出一条不支持意见。"""
-    return _build_opinion(symbol, 0, False, SIGNAL_NEUTRAL, 0.0, reason, [])
+    return _build_opinion(symbol, 0, False, SIGNAL_NEUTRAL, 0.0, reason, [], horizon=TIME_HORIZON_SHORT_TERM)

@@ -10,6 +10,16 @@
 #                                    通过条件增加「次高池得分 ≥ 该值」，排除「单池满分、其余 0」的通过
 #                                    详见 02_B模块通过组合与设计符合度分析.md §五
 # -------------------------------------------------------------------------
+#
+# ---------- optimization 常用项速读（module_b_quant_engine.optimization）----------
+# trend_confirm_bars          趋势池：最近几根 K 都要满足条件才给分（越大越严）
+# breakout_confirm_bars       突破池：最近几根里至少几根满足突破（越大越严）
+# multi_pool_min_score/bonus  多池共振：至少两池 ≥ min 时总分 +bonus（cap 100）
+# pool_4_momentum_enabled     是否启用第四池「动量」（20 日收益分位 + 价在 MA20 上）
+# momentum_percentile_threshold 动量池：全市场/板块内 20 日收益分位下限，如 0.80=前 20%
+# fusion_mode / fusion_weights 多池合成：weighted=按权重加权和；max=取最高池；weights 对应排序后第 1、2、3 高分池
+# reversion_volume_bounce_*   反转池：放量止跌时的额外乘数（非「第四池」）
+# -------------------------------------------------------------------------
 
 module_b_quant_engine:
   strategy_pools:
@@ -75,8 +85,8 @@ module_b_quant_engine:
     # 突破 3 日有效确认
     breakout_hold_days: 0
     breakout_hold_ratio: 0.98
-    # 第四池动量
-    pool_4_momentum_enabled: false
+    # 第四池动量（默认开启；与 a_track_short 无冲突）
+    pool_4_momentum_enabled: true
     momentum_percentile_threshold: 0.80
     # 多池融合：加权（默认）| max
     fusion_mode: weighted
@@ -87,9 +97,30 @@ module_b_quant_engine:
     multi_pool_tier2_bonus: 5
     # 输出截面分位（默认开启）
     output_score_percentile: true
+    # ---------- 两阶段粗筛（默认开启；分位阈值为 0 时仅走分位管线、不额外剔除标的）----------
+    coarse_screen:
+      enabled: true
+      min_momentum_percentile: 0.0
+      min_liquidity_percentile: 0.0
+    # 最近 N 个日历日：仅当该标的「最新一条」仍为确认/通过档时跳过；最新一条未通过则允许重算（见 signal_cooldown 实现）
+    signal_cooldown_days: 1
+    signal_cooldown_confirmed_only: true
+  # ---------- 性能：线程池并行 evaluate_pools（TA-Lib 多释放 GIL）；0=串行 ----------
+  scanner_performance:
+    parallel_workers: 4
+    min_symbols_for_parallel: 48
+    metrics_log_json: true
+  # ---------- 下游契约：每条信号附带 market_regime；metrics 写日志 ----------
+  product_signals:
+    emit_market_regime_per_row: true
+    emit_scanner_metrics_log: true
   filters:
+    # 板块强度：同行业 technical_score 截面均值比；数据源 L2 industry_revenue_summary（与 Module A 同源）
     sector_strength:
-      enabled: false
+      enabled: true
+      mode: technical_ratio_to_sector_mean
+      # 无行业名或 L2 无映射行时使用的 sector_strength 系数（默认 1.0，与历史「恒为 1.0」一致）；信号上 industry_mapped=false
+      unmapped_sector_strength: 1.0
     liquidity:
       enabled: false
       min_score: 0
@@ -98,6 +129,27 @@ module_b_quant_engine:
       enabled: false
       percentile_threshold: 0.90
       penalty_ratio: 0.8
+    # ---------- 基准指数 MA regime；熊市时对趋势池乘子（默认开启）----------
+    index_regime:
+      enabled: true
+      benchmark_symbol: "000300.SH"
+      ma_short: 20
+      ma_long: 60
+      bear_trend_pool_mult: 0.72
+      stress_vol_enabled: true
+      stress_atr_percentile: 0.82
+      stress_breakout_mult: 0.88
+      stress_reversion_mult: 1.06
+      stress_lookback_bars: 60
+    # ---------- Module A 门控（默认开启；allowed_primary_tags 为空=全放行）----------
+    # match_mode: exact_primary = 仅 primary_tag 字符串全等（与历史行为一致）
+    #            domain_or_primary = primary_tag 或 tags_json 首条领域桶（农业/科技/宏观/未知/自定义）任一命中即可
+    # batch_id: 非空时只读该批 classifier_output_snapshot（与当次 A 同批）；null=每标的最新一条。环境变量 SCANNER_CLASSIFIER_BATCH_ID 覆盖此处。
+    classifier_gate:
+      enabled: true
+      match_mode: domain_or_primary
+      batch_id: null
+      allowed_primary_tags: []
   # 变量说明见文件顶部 scanner 节点变量说明
   # ---------- B 轨长期价值发现（long_term）----------
   # long_term_enabled           bool   是否计算长期动量并输出 long_term_score / long_term_candidate；默认 true
@@ -108,6 +160,75 @@ module_b_quant_engine:
     enabled: true
     lookback_days: 120
     score_threshold: 0.6
+  # ---------- A 轨短线 a_track_short（技术面 + 建议风控；≠ 三轨制里的「B 轨中线」）----------
+  # 【三档模式 signal_profile】键名须英文；含义如下（只改一个键即切换预设）：
+  #   alert_sensitive → 灵敏预警：预警分更低、部分策略更早给分（见 profiles 下覆盖）
+  #   balanced        → 平衡：不读 profiles 里额外覆盖，用全局 scanner + optimization
+  #   strict          → 严控：提高确认分、要求次池也有分，信号更少更挑
+  # 【双档】dual_tier_output：true 时同时算「预警档 ALERT」与「确认档 CONFIRMED」，L2 可只消费确认档
+  a_track_short:
+    signal_profile: balanced
+    dual_tier_output: true
+    profiles:
+      # 灵敏预警：总分 ≥ alert_technical_score_threshold 可出预警；optimization 可放宽单池确认根数
+      alert_sensitive:
+        alert_technical_score_threshold: 50
+        optimization:
+          trend_confirm_bars: 2
+      balanced: {}
+      # 严控：抬高确认阈值 + 次高池下限，减少「单池虚高」通过
+      strict:
+        scanner:
+          technical_score_threshold: 75
+          pass_require_second_pool_min: 25
+    risk:
+      # 是否计算建议入场/止损/止盈并写入信号（false 则相关字段为空）
+      enabled: true
+      # 入场价语义标签：当前代码固定用「最后一根日线收盘价」作参考入场价；本字段写入 risk_rules_json 供下游识别，不参与分支
+      entry_price_field: last_close
+      # 止损算法：fixed_pct=入场价×(1-比例)；atr_multiple=入场价 − ATR×倍数（无 TA-Lib 或 ATR 无效时回退 fixed_pct）
+      stop_mode: fixed_pct
+      # 固定止损比例，如 0.02≈下跌 2% 触发止损价（与 stop_mode=fixed_pct 或 ATR 回退共用）
+      fixed_stop_pct: 0.02
+      # ATR 回望根数（仅 stop_mode=atr_multiple 时参与计算；调用 TA-Lib ATR(high,low,close,period)）
+      atr_period: 14
+      # 止损距离（金额）= 最后一根 K 的 ATR 值 × 本倍数；止损价 = 入场价 − 该距离
+      atr_stop_multiple: 2.0
+      # 止盈分档：R=每股风险(入场−止损)；第 i 档止盈价 = 入场 + multiples[i]×R；如 [1,2] 即 1R、2R 两目标
+      take_profit_r_multiples: [1.0, 2.0]
+      # ---------- 可选：按主策略池覆盖（strategy_source 1~4；键须加引号）----------
+      # 合并顺序：先全局 risk，再叠本表；再叠 volatility_tier、alert_tier
+      # 若希望全市场统一一套止损逻辑：删除本段或改为 strategy_risk_overrides: {}
+      strategy_risk_overrides:
+        "1":  # 趋势：建议用 ATR 止损（与波动挂钩）
+          stop_mode: atr_multiple
+          atr_stop_multiple: 2.0
+        "2":  # 反转：固定比例略宽，减少噪声扫损
+          stop_mode: fixed_pct
+          fixed_stop_pct: 0.025
+        "3":  # 突破：ATR 略紧
+          stop_mode: atr_multiple
+          atr_stop_multiple: 1.8
+        "4":  # 动量：与趋势类似
+          stop_mode: atr_multiple
+          atr_stop_multiple: 2.0
+      # ---------- 可选：截面波动分档（本批标的 ATR/close 截面分位；与 filters.volatility_regime 独立）----------
+      volatility_tier:
+        enabled: true
+        low_atr_percentile_max: 0.33
+        high_atr_percentile_min: 0.66
+        low_volatility:   # 相对低波：略收紧止损距离
+          atr_stop_multiple_scale: 0.92
+          fixed_stop_pct_scale: 0.92
+        mid_volatility:
+          atr_stop_multiple_scale: 1.0
+          fixed_stop_pct_scale: 1.0
+        high_volatility:  # 相对高波：略放宽
+          atr_stop_multiple_scale: 1.1
+          fixed_stop_pct_scale: 1.06
+      # ---------- 可选：预警档 ALERT 单独止盈档位（确认档 CONFIRMED 仍用 take_profit_r_multiples）----------
+      alert_tier:
+        take_profit_r_multiples: [0.5, 1.0]
   scanner:
     technical_score_threshold: 70
     sector_strength_threshold: 1.0

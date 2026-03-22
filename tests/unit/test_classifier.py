@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from diting.classifier import SemanticClassifier
-from diting.classifier.semantic import load_rules
+from diting.classifier.semantic import load_rules, refine_power_label_from_disclosure
 from diting.protocols.classifier_pb2 import (
     ClassifierOutput,
     DomainTag,
@@ -62,11 +62,14 @@ def test_classifier_package_and_config_exist():
 
 
 def test_agri_tag_for_longping():
-    """000998.SZ（隆平高科）预期为 AGRI。"""
+    """000998.SZ（隆平高科）预期为 AGRI；无主营表时 segment 显式为无披露，不伪造分部。"""
     clf = SemanticClassifier(rules=load_rules())
     out = clf.classify("000998.SZ")
     tags = [t.domain_tag for t in out.tags]
     assert DomainTag.AGRI in tags
+    assert len(out.segment_shares) >= 1
+    assert out.segment_shares[0].is_primary
+    assert (out.segment_shares[0].segment_id or "") == "seg_no_disclosure"
 
 
 def test_tech_tag_for_smic():
@@ -165,6 +168,65 @@ def test_classify_batch_returns_list_and_logs_universe_size():
         assert isinstance(out, ClassifierOutput)
         assert out.symbol in universe
     assert [r.symbol for r in results] == universe
+
+
+def test_refine_power_label_from_disclosure():
+    assert refine_power_label_from_disclosure("水力发电") == "水电"
+    assert refine_power_label_from_disclosure("燃煤发电") == "火电"
+    assert refine_power_label_from_disclosure("风力发电") == "风电"
+    assert refine_power_label_from_disclosure("光伏发电") == "新能源发电"
+    assert refine_power_label_from_disclosure("售电业务") == "售电"
+
+
+def test_bare_power_no_disclosure_explicit_label():
+    """申万仅「电力」且无 L2 主营披露 → 主标签「无披露」（不输出粗兜底、不伪造分部）。"""
+    def ind(_symbol):
+        return ("电力", 0.9, 0.0, 0.0)
+
+    clf = SemanticClassifier(rules=load_rules(), industry_revenue_provider=ind)
+    out = clf.classify("600900.SH")
+    assert out.tags[0].domain_tag == DomainTag.DOMAIN_CUSTOM
+    assert (out.tags[0].domain_label or "") == "无披露"
+    assert (out.segment_shares[0].segment_id or "") == "seg_no_disclosure"
+
+
+def test_power_comprehensive_refined_to_hydro_by_disclosure():
+    """申万仅「电力」+ 主营披露含水力 → 细化为水电。"""
+
+    def ind(_symbol):
+        return ("电力", 0.9, 0.0, 0.0)
+
+    def top1(_symbol):
+        return "水力发电"
+
+    clf = SemanticClassifier(
+        rules=load_rules(),
+        industry_revenue_provider=ind,
+        segment_top1_name_provider=top1,
+    )
+    out = clf.classify("600900.SH")
+    assert out.tags[0].domain_tag == DomainTag.DOMAIN_CUSTOM
+    assert out.tags[0].domain_label == "水电"
+
+
+def test_power_fallback_multi_disclosure_tags():
+    """电力兜底 + 主营披露多条：细化为不同运营子类时输出多 Tag。"""
+    def ind(_symbol):
+        return ("电力", 0.9, 0.0, 0.0)
+
+    def names(_symbol):
+        return ["水力发电", "售电业务"]
+
+    clf = SemanticClassifier(
+        rules=load_rules(),
+        industry_revenue_provider=ind,
+        segment_disclosure_names_provider=names,
+    )
+    out = clf.classify("600900.SH")
+    assert len(out.tags) == 2
+    assert out.tags[0].domain_label == "水电"
+    assert out.tags[1].domain_label == "售电"
+    assert out.tags[1].confidence <= out.tags[0].confidence
 
 
 def test_load_rules_from_path():

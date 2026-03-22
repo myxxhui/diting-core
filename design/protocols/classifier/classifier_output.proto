@@ -15,10 +15,18 @@ enum DomainTag {
   DOMAIN_CUSTOM = 5;
 }
 
+// 与 Python 占位 classifier_pb2 同步；protoc 生成后可替换 hand-written 模块
+message SegmentShare {
+  string segment_id = 1;
+  double revenue_share = 2;
+  bool is_primary = 3;
+}
+
 message ClassifierOutput {
   string symbol = 1;
   repeated TagWithConfidence tags = 2;
   string correlation_id = 3;
+  repeated SegmentShare segment_shares = 4;
 }
 
 message TagWithConfidence {

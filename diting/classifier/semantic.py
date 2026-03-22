@@ -11,6 +11,7 @@ import yaml
 from diting.protocols.classifier_pb2 import (
     ClassifierOutput,
     DomainTag,
+    SegmentShare,
     TagWithConfidence,
 )
 
@@ -21,6 +22,53 @@ _DOMAIN_TAG_BY_ID = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+def _is_bare_power_industry(industry: str) -> bool:
+    """申万二级常为单独「电力」；此类不做 YAML 粗标签兜底，只走主营披露映射。"""
+    s = (industry or "").strip().replace(" ", "")
+    if not s:
+        return False
+    return s in ("电力", "电力行业")
+
+
+def refine_power_label_from_disclosure(name_cn: str) -> Optional[str]:
+    """
+    申万行业名仅为「电力」时，用主营披露分部名称映射为运营子类（无映射规则时由调用方使用披露原文）。
+    与 classifier_rules 中 火电/水电/风电运营/新能源发电 等展示名对齐；可扩展售电/配电/电网等垂直口径。
+    """
+    s = (name_cn or "").strip()
+    if len(s) < 2:
+        return None
+    # 更具体优先（与披露常见表述对齐）
+    if any(k in s for k in ("抽水蓄能", "蓄能电站")):
+        return "水电"
+    if any(k in s for k in ("水力", "水电", "水利发电")):
+        return "水电"
+    if any(k in s for k in ("火力", "燃煤", "煤电", "热电联产", "热电", "火电")):
+        return "火电"
+    if any(k in s for k in ("核电", "核能", "核力")):
+        return "核电"
+    if any(k in s for k in ("风电", "风力发电", "风力")):
+        return "风电"
+    if any(k in s for k in ("太阳能", "光伏发电", "光伏", "光热发电", "垃圾发电", "生物质", "新能源发电")):
+        return "新能源发电"
+    if any(k in s for k in ("清洁能源", "绿电", "可再生能源")):
+        return "新能源发电"
+    if "燃气" in s:
+        return "燃气"
+    if any(k in s for k in ("热力", "供热", "供暖")):
+        return "热力"
+    if "售电" in s or any(k in s for k in ("电力销售", "供电业务", "供电服务")):
+        return "售电"
+    if any(k in s for k in ("配电", "输配电", "配电网")):
+        return "配电运营"
+    if any(k in s for k in ("输电", "电网运营", "电网建设")):
+        return "电网运营"
+    if "综合能源" in s:
+        return "综合能源服务"
+    return None
+
 
 # 默认规则路径：与 DNA delivery_scope、实践文档约定一致
 DEFAULT_RULES_PATH = "config/classifier_rules.yaml"
@@ -60,18 +108,29 @@ class SemanticClassifier:
         industry_revenue_provider: Optional[
             Callable[[str], Tuple[str, float, float, float]]
         ] = None,
+        business_segment_provider: Optional[Callable[[str], List[SegmentShare]]] = None,
+        segment_top1_name_provider: Optional[Callable[[str], Optional[str]]] = None,
+        segment_disclosure_names_provider: Optional[Callable[[str], List[str]]] = None,
     ):
         """
         :param rules: 若提供则直接使用，否则从 rules_path 或默认路径加载
         :param rules_path: YAML 规则文件路径
         :param industry_revenue_provider: (symbol) -> (industry_name, revenue_ratio, rnd_ratio, commodity_revenue_ratio)
             不提供时使用内置 Mock（数据不可用时 Mock，见 01_语义分类器_实践）
+        :param business_segment_provider: (symbol) -> segment_shares；有 L2 symbol_business_profile 时由采集写入；
+            无表数据时 segment_shares 为 seg_no_disclosure（见 _fallback_segment_shares_no_disclosure）。
+        :param segment_top1_name_provider: (symbol) -> 主营披露 Top1 中文名；申万仅为「电力」且无 names 时用。
+        :param segment_disclosure_names_provider: (symbol) -> 主营披露分部名列表（营收降序）；
+            申万「电力」时逐条映射为运营子类；无映射规则时用披露原文作垂直标签。
         """
         if rules is not None:
             self._rules = rules
         else:
             self._rules = load_rules(rules_path)
         self._provider = industry_revenue_provider or _default_mock_provider()
+        self._business_segment_provider = business_segment_provider
+        self._segment_top1_name_provider = segment_top1_name_provider
+        self._segment_disclosure_names_provider = segment_disclosure_names_provider
 
     def classify(
         self,
@@ -123,16 +182,99 @@ class SemanticClassifier:
 
         unknown_cfg = self._rules.get("unknown") or {}
         default_conf = unknown_cfg.get("default_confidence") or 0.5
+        if not tags_with_conf and _is_bare_power_industry(industry):
+            tags_with_conf = self._tags_for_bare_power_industry(symbol, default_conf)
         if not tags_with_conf:
             tags_with_conf.append(
                 TagWithConfidence(domain_tag=DomainTag.UNKNOWN, confidence=default_conf)
             )
 
+        segment_shares: List[SegmentShare] = []
+        if self._business_segment_provider:
+            try:
+                segment_shares = self._business_segment_provider(symbol) or []
+            except Exception as e:
+                logger.debug("business_segment_provider(%s): %s", symbol, e)
+                segment_shares = []
+        if not segment_shares:
+            segment_shares = self._fallback_segment_shares_no_disclosure()
         return ClassifierOutput(
             symbol=symbol,
             tags=tags_with_conf,
             correlation_id=correlation_id,
+            segment_shares=segment_shares,
         )
+
+    def _tags_for_bare_power_industry(
+        self, symbol: str, default_conf: float
+    ) -> List[TagWithConfidence]:
+        """
+        申万二级仅为「电力」：无 YAML 粗标签；必须有 L2 主营披露才可分类。
+        优先映射为水电/火电等规范子类；否则用披露分部原文；无披露则未知。
+        """
+        names: List[str] = []
+        if self._segment_disclosure_names_provider:
+            try:
+                names = self._segment_disclosure_names_provider(symbol) or []
+            except Exception as e:
+                logger.debug("segment_disclosure_names_provider(%s): %s", symbol, e)
+                names = []
+        if not names and self._segment_top1_name_provider:
+            try:
+                one = self._segment_top1_name_provider(symbol)
+                if one and str(one).strip():
+                    names = [str(one).strip()]
+            except Exception as e:
+                logger.debug("segment_top1_name_provider(%s): %s", symbol, e)
+        refined: List[str] = []
+        seen: set = set()
+        for n in names:
+            r = refine_power_label_from_disclosure(n)
+            if r and r not in seen:
+                seen.add(r)
+                refined.append(r)
+        if refined:
+            c0 = 0.88
+            tags: List[TagWithConfidence] = [
+                TagWithConfidence(
+                    domain_tag=DomainTag.DOMAIN_CUSTOM,
+                    confidence=c0,
+                    domain_label=refined[0],
+                )
+            ]
+            sec = min(0.82, c0)
+            for lab in refined[1:4]:
+                tags.append(
+                    TagWithConfidence(
+                        domain_tag=DomainTag.DOMAIN_CUSTOM,
+                        confidence=sec,
+                        domain_label=lab,
+                    )
+                )
+            return tags
+        if names:
+            raw = (names[0] or "").strip()[:48]
+            if raw:
+                return [
+                    TagWithConfidence(
+                        domain_tag=DomainTag.DOMAIN_CUSTOM,
+                        confidence=0.78,
+                        domain_label=raw,
+                    )
+                ]
+        return [
+            TagWithConfidence(
+                domain_tag=DomainTag.DOMAIN_CUSTOM,
+                confidence=default_conf,
+                domain_label="无披露",
+            )
+        ]
+
+    def _fallback_segment_shares_no_disclosure(self) -> List[SegmentShare]:
+        """
+        无 L2 symbol_business_profile 行时：不伪造与行业/主 Tag 绑定的分部 ID，统一标注无披露。
+        """
+        return [SegmentShare(segment_id="seg_no_disclosure", revenue_share=1.0, is_primary=True)]
 
     def _classify_legacy(
         self, industry: str, revenue_ratio: float, rnd_ratio: float, commodity_ratio: float

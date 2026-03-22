@@ -23,6 +23,7 @@ if _env.exists():
                 if k and os.environ.get(k) is None:
                     os.environ[k] = v
 
+# 与 diting-infra/schemas/sql/07_l2_quant_signal_snapshot.sql 一致；老库仍靠 ALTER_EXTRA 补列
 DDL = """
 CREATE TABLE IF NOT EXISTS quant_signal_snapshot (
     id                BIGSERIAL PRIMARY KEY,
@@ -37,7 +38,18 @@ CREATE TABLE IF NOT EXISTS quant_signal_snapshot (
     breakout_score     DOUBLE PRECISION NOT NULL DEFAULT 0,
     momentum_score     DOUBLE PRECISION NOT NULL DEFAULT 0,
     technical_score_percentile DOUBLE PRECISION,
+    long_term_score    DOUBLE PRECISION,
+    long_term_candidate BOOLEAN NOT NULL DEFAULT FALSE,
     correlation_id     VARCHAR(64)  NOT NULL DEFAULT '',
+    signal_tier        VARCHAR(16) NOT NULL DEFAULT '',
+    alert_passed       BOOLEAN NOT NULL DEFAULT FALSE,
+    confirmed_passed   BOOLEAN NOT NULL DEFAULT FALSE,
+    entry_reference_price DOUBLE PRECISION,
+    stop_loss_price    DOUBLE PRECISION,
+    take_profit_json   TEXT,
+    risk_rules_json    TEXT,
+    scanner_rules_fingerprint VARCHAR(32) NOT NULL DEFAULT '',
+    evaluation_source  VARCHAR(16)  NOT NULL DEFAULT 'FRESH',
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_quant_signal_snapshot_batch ON quant_signal_snapshot(batch_id);
@@ -58,8 +70,20 @@ CREATE TABLE IF NOT EXISTS quant_signal_scan_all (
     momentum_score     DOUBLE PRECISION NOT NULL DEFAULT 0,
     technical_score_percentile DOUBLE PRECISION,
     passed             BOOLEAN       NOT NULL DEFAULT FALSE,
+    long_term_score    DOUBLE PRECISION,
+    long_term_candidate BOOLEAN NOT NULL DEFAULT FALSE,
     correlation_id     VARCHAR(64)  NOT NULL DEFAULT '',
-    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    signal_tier        VARCHAR(16) NOT NULL DEFAULT '',
+    alert_passed       BOOLEAN NOT NULL DEFAULT FALSE,
+    confirmed_passed   BOOLEAN NOT NULL DEFAULT FALSE,
+    entry_reference_price DOUBLE PRECISION,
+    stop_loss_price    DOUBLE PRECISION,
+    take_profit_json   TEXT,
+    risk_rules_json    TEXT,
+    scanner_rules_fingerprint VARCHAR(32) NOT NULL DEFAULT '',
+    evaluation_source  VARCHAR(16)  NOT NULL DEFAULT 'FRESH',
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_quant_signal_scan_all_batch ON quant_signal_scan_all(batch_id);
 CREATE INDEX IF NOT EXISTS idx_quant_signal_scan_all_symbol ON quant_signal_scan_all(symbol);
@@ -85,6 +109,26 @@ ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS long_term_score DOUBL
 ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS long_term_candidate BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS long_term_score DOUBLE PRECISION;
 ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS long_term_candidate BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS signal_tier VARCHAR(16) NOT NULL DEFAULT '';
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS alert_passed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS confirmed_passed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS entry_reference_price DOUBLE PRECISION;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS take_profit_json TEXT;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS risk_rules_json TEXT;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS signal_tier VARCHAR(16) NOT NULL DEFAULT '';
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS alert_passed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS confirmed_passed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS entry_reference_price DOUBLE PRECISION;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS take_profit_json TEXT;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS risk_rules_json TEXT;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+UPDATE quant_signal_scan_all SET updated_at = created_at WHERE updated_at IS NULL;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS scanner_rules_fingerprint VARCHAR(32) NOT NULL DEFAULT '';
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS evaluation_source VARCHAR(16) NOT NULL DEFAULT 'FRESH';
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS scanner_rules_fingerprint VARCHAR(32) NOT NULL DEFAULT '';
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS evaluation_source VARCHAR(16) NOT NULL DEFAULT 'FRESH';
 """
 
 

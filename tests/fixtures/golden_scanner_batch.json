@@ -1,0 +1,23 @@
+{
+  "universe": ["000001.SZ", "600000.SH"],
+  "symbols": {
+    "000001.SZ": {
+      "technical_score_min": 90.0,
+      "technical_score_max": 96.0,
+      "sector_strength": 1.0,
+      "industry_mapped": false,
+      "strategy_source": 4
+    },
+    "600000.SH": {
+      "technical_score_min": 76.0,
+      "technical_score_max": 84.0,
+      "sector_strength": 1.0,
+      "industry_mapped": false,
+      "strategy_source": 4
+    }
+  },
+  "metrics_extra": {
+    "sector_strength_unmapped_count": 2,
+    "sector_strength_mapped_count": 0
+  }
+}

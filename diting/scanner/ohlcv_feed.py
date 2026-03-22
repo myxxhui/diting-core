@@ -3,7 +3,7 @@
 
 import logging
 import os
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,84 @@ def _mock_ohlcv_arrays(symbol: str, bars: int = 80) -> Tuple[List[float], List[f
         volumes.append(v)
         base = c
     return (opens, highs, lows, closes, volumes)
+
+
+def get_ohlcv_batch_arrays_for_talib(
+    symbols: List[str],
+    period: str = "daily",
+    limit: int = 120,
+    dsn: Optional[str] = None,
+) -> Dict[str, Tuple[Any, Any, Any, Any, Any]]:
+    """
+    批量读取多标的 OHLCV，单次 SQL + 内存分组，降低全市场扫描时的 DB 往返。
+    无 DSN、失败或 psycopg2 不可用时返回 {}，调用方回退为逐标的 get_ohlcv_arrays_for_talib。
+    """
+    if not symbols:
+        return {}
+    dsn = dsn or os.environ.get("TIMESCALE_DSN", "").strip()
+    if not dsn:
+        return {}
+    try:
+        import psycopg2
+    except ImportError:
+        return {}
+    uniq = []
+    seen = set()
+    for s in symbols:
+        u = str(s).strip().upper()
+        if u and u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    if not uniq:
+        return {}
+    out: Dict[str, Tuple[Any, Any, Any, Any, Any]] = {}
+    try:
+        conn = psycopg2.connect(dsn, connect_timeout=15)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT symbol, open, high, low, close, volume
+                FROM (
+                    SELECT symbol, open, high, low, close, volume, datetime,
+                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY datetime DESC) AS rn
+                    FROM ohlcv
+                    WHERE symbol = ANY(%s) AND period = %s
+                ) t
+                WHERE rn <= %s
+                ORDER BY symbol, datetime ASC
+                """,
+                (uniq, period, limit),
+            )
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("OHLCV 批量读取失败: %s", e)
+        return {}
+    from collections import defaultdict
+
+    by_sym: Dict[str, List] = defaultdict(list)
+    for r in rows:
+        sym = str(r[0]).strip().upper()
+        by_sym[sym].append((float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])))
+    for sym, bars in by_sym.items():
+        if len(bars) < 20:
+            continue
+        opens, highs, lows, closes, vols = zip(*bars)
+        o, h, l, c, v = (list(opens), list(highs), list(lows), list(closes), list(vols))
+        if _HAS_NUMPY:
+            out[sym] = (
+                np.asarray(o, dtype=float),
+                np.asarray(h, dtype=float),
+                np.asarray(l, dtype=float),
+                np.asarray(c, dtype=float),
+                np.asarray(v, dtype=float),
+            )
+        else:
+            out[sym] = (o, h, l, c, v)
+    return out
 
 
 def get_ohlcv_arrays_for_talib(

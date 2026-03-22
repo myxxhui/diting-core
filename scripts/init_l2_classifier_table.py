@@ -28,15 +28,26 @@ CREATE TABLE IF NOT EXISTS classifier_output_snapshot (
     id                BIGSERIAL PRIMARY KEY,
     batch_id           VARCHAR(64)  NOT NULL,
     symbol             VARCHAR(32)  NOT NULL,
-    primary_tag        VARCHAR(16)  NOT NULL DEFAULT '未知',
+    primary_tag        VARCHAR(64)  NOT NULL DEFAULT '未知',
     primary_confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
     tags_json          JSONB,
+    segment_shares_json JSONB,
     correlation_id     VARCHAR(64)  NOT NULL DEFAULT '',
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_classifier_output_snapshot_batch ON classifier_output_snapshot(batch_id);
 CREATE INDEX IF NOT EXISTS idx_classifier_output_snapshot_symbol ON classifier_output_snapshot(symbol);
 CREATE INDEX IF NOT EXISTS idx_classifier_output_snapshot_created ON classifier_output_snapshot(created_at DESC);
+"""
+
+DDL_ALTER_SEGMENT = """
+ALTER TABLE classifier_output_snapshot
+  ADD COLUMN IF NOT EXISTS segment_shares_json JSONB;
+"""
+
+ALTER_PRIMARY_TAG_WIDEN = """
+ALTER TABLE classifier_output_snapshot
+  ALTER COLUMN primary_tag TYPE VARCHAR(64);
 """
 
 
@@ -58,6 +69,17 @@ def main():
             stmt = stmt.strip()
             if stmt:
                 cur.execute(stmt)
+        for stmt in DDL_ALTER_SEGMENT.strip().split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                try:
+                    cur.execute(stmt)
+                except Exception as ex:
+                    print("ALTER 未完全成功（若列已存在可忽略）: %s" % ex, file=sys.stderr)
+        try:
+            cur.execute(ALTER_PRIMARY_TAG_WIDEN.strip())
+        except Exception as ex:
+            print("primary_tag 扩列（若已宽可忽略）: %s" % ex, file=sys.stderr)
         cur.close()
         conn.close()
         print("L2 表 classifier_output_snapshot 已就绪（已存在或已创建）。")

@@ -95,33 +95,74 @@ def run_once() -> int:
 
     # 有 L2 时对每只标的从 L2 查行业/营收（一次批量查库）；L2 行业名为空时用 config/industry_fallback.csv 补全，使 Module A 能输出非「未知」
     industry_provider = None
+    business_segment_provider = None
+    segment_top1_name_provider = None
+    segment_disclosure_names_provider = None
     if os.environ.get("PG_L2_DSN") and universe:
         try:
+            from diting.classifier.business_segment_provider import (
+                get_segment_disclosure_names_batch,
+                get_top_segment_disclosure_batch,
+                make_business_segment_provider,
+            )
             from diting.classifier.l2_provider import get_l2_industry_revenue_batch
-            from diting.ingestion.industry_revenue import _load_industry_fallback
+            from diting.ingestion.industry_revenue import (
+                _load_industry_fallback,
+                industry_name_needs_fallback,
+            )
             l2_data = get_l2_industry_revenue_batch(os.environ["PG_L2_DSN"], universe)
             missing = ("未知", 0.0, 0.0, 0.0)
             merged = {}
             for s in universe:
                 key = (s or "").strip().upper()
                 t = l2_data.get(key, ("", 0.0, 0.0, 0.0))
-                if (t[0] or "").strip():
+                if not industry_name_needs_fallback(t[0]):
                     merged[key] = t
                 else:
                     iname = _load_industry_fallback(s) or "未知"
                     merged[key] = (iname, float(t[1] or 0), float(t[2] or 0), float(t[3] or 0))
             industry_provider = lambda s: merged.get((s or "").strip().upper(), missing)
-            n_fallback = sum(1 for s in universe if not (l2_data.get((s or "").strip().upper(), ("", 0, 0, 0))[0] or "").strip())
+            n_fallback = sum(
+                1
+                for s in universe
+                if industry_name_needs_fallback(
+                    l2_data.get((s or "").strip().upper(), ("", 0, 0, 0))[0]
+                )
+            )
             logger.info("使用 L2 行业/营收批量数据，覆盖 %s/%s 只标的%s", len(l2_data), len(universe), "（其中行业名为空已用 industry_fallback 补全 %s 只）" % n_fallback if n_fallback else "")
+            business_segment_provider = make_business_segment_provider(
+                os.environ["PG_L2_DSN"], universe
+            )
+            _disc = get_top_segment_disclosure_batch(os.environ["PG_L2_DSN"], universe)
+            _names_by_sym = get_segment_disclosure_names_batch(os.environ["PG_L2_DSN"], universe)
+
+            def _segment_top1_name(sym: str):
+                row = _disc.get((sym or "").strip().upper())
+                if not row:
+                    return None
+                n = (row[0] or "").strip()
+                return n or None
+
+            def _segment_disclosure_names(sym: str):
+                return _names_by_sym.get((sym or "").strip().upper(), [])
+
+            segment_top1_name_provider = _segment_top1_name
+            segment_disclosure_names_provider = _segment_disclosure_names
         except Exception as e:
             logger.warning("L2 行业数据未启用，回退 Mock: %s", e)
 
     batch_id = str(uuid.uuid4())
-    results = SemanticClassifier.run_full(
+    run_kw = dict(
         universe=universe,
         correlation_id=batch_id,
         industry_revenue_provider=industry_provider,
+        business_segment_provider=business_segment_provider,
     )
+    if segment_top1_name_provider is not None:
+        run_kw["segment_top1_name_provider"] = segment_top1_name_provider
+    if segment_disclosure_names_provider is not None:
+        run_kw["segment_disclosure_names_provider"] = segment_disclosure_names_provider
+    results = SemanticClassifier.run_full(**run_kw)
     logger.info("语义分类器本批完成：执行 %s 只，输出 %s 条", len(universe), len(results))
 
     # [Ref: 01_语义分类器_实践 F9] ClassifierOutput 写入 L2 表 classifier_output_snapshot，供 Module B 按 batch_id 读取

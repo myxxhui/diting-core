@@ -38,28 +38,64 @@ def main():
         print("FAIL: 未获取到标的列表（请配置 DITING_SYMBOLS 或保证 config/diting_symbols.txt 存在且非空）")
         sys.exit(1)
 
-    # 与 run.py 一致：L2 + industry_fallback
+    # 与 run.py 一致：L2 + industry_fallback + 主营 segment
     industry_provider = None
+    business_segment_provider = None
+    segment_top1_name_provider = None
+    segment_disclosure_names_provider = None
     if os.environ.get("PG_L2_DSN") and universe:
         try:
+            from diting.classifier.business_segment_provider import (
+                get_segment_disclosure_names_batch,
+                get_top_segment_disclosure_batch,
+                make_business_segment_provider,
+            )
             from diting.classifier.l2_provider import get_l2_industry_revenue_batch
-            from diting.ingestion.industry_revenue import _load_industry_fallback
+            from diting.ingestion.industry_revenue import (
+                _load_industry_fallback,
+                industry_name_needs_fallback,
+            )
             l2_data = get_l2_industry_revenue_batch(os.environ["PG_L2_DSN"], universe)
             missing = ("未知", 0.0, 0.0, 0.0)
             merged = {}
             for s in universe:
                 key = (s or "").strip().upper()
                 t = l2_data.get(key, ("", 0.0, 0.0, 0.0))
-                if (t[0] or "").strip():
+                if not industry_name_needs_fallback(t[0]):
                     merged[key] = t
                 else:
                     iname = _load_industry_fallback(s) or "未知"
                     merged[key] = (iname, float(t[1] or 0), float(t[2] or 0), float(t[3] or 0))
             industry_provider = lambda sym, m=merged, mis=missing: m.get((sym or "").strip().upper(), mis)
+            business_segment_provider = make_business_segment_provider(os.environ["PG_L2_DSN"], universe)
+            _disc = get_top_segment_disclosure_batch(os.environ["PG_L2_DSN"], universe)
+            _names_by_sym = get_segment_disclosure_names_batch(os.environ["PG_L2_DSN"], universe)
+
+            def _top1_name(sym: str):
+                row = _disc.get((sym or "").strip().upper())
+                if not row:
+                    return None
+                n = (row[0] or "").strip()
+                return n or None
+
+            def _segment_disclosure_names(sym: str):
+                return _names_by_sym.get((sym or "").strip().upper(), [])
+
+            segment_top1_name_provider = _top1_name
+            segment_disclosure_names_provider = _segment_disclosure_names
         except Exception:
             pass
 
-    clf = SemanticClassifier(rules=load_rules(), industry_revenue_provider=industry_provider)
+    clf_kw = dict(
+        rules=load_rules(),
+        industry_revenue_provider=industry_provider,
+        business_segment_provider=business_segment_provider,
+    )
+    if segment_top1_name_provider is not None:
+        clf_kw["segment_top1_name_provider"] = segment_top1_name_provider
+    if segment_disclosure_names_provider is not None:
+        clf_kw["segment_disclosure_names_provider"] = segment_disclosure_names_provider
+    clf = SemanticClassifier(**clf_kw)
     results = clf.classify_batch(universe, correlation_id="verify-batch")
     n_out = len(results)
     confidence_ok = True

@@ -1,126 +1,528 @@
 # [Ref: 01_语义分类器] [Ref: dna_module_a.classification_rules]
 # 分类规则由 YAML 驱动；categories 按顺序匹配，先匹配先采用。
-# id 为 农业/科技/宏观 时对应 DomainTag 枚举（存储与展示均用中文），其余为自定义 + label。
-# industry_keywords 为子串匹配（"电子" 命中 "消费电子"），覆盖申万一级+二级行业。
+# id 为 农业/科技/宏观 时对应 DomainTag 枚举；其余为 DOMAIN_CUSTOM，primary_tag = label。
+# industry_keywords 为子串匹配（keyword in industry_name），须与 L2 申万行业名一致；
+# 例如「电池」「电力」等二级名需单独列出，不能仅靠「锂电池」「电力及公用事业」覆盖。
+# 电力链：火电/水电/核电/风电/新能源发电/燃气/热力 → 公用事业（整段名）；裸「电力」不在此表兜底，由代码按 L2 主营披露映射（无披露则未知）。
+# 结构：各大类下「细分子类」在前、「宽口径兜底」在后；新增申万一级见文末「综合与其它」。
 
 categories:
-  # ===== 三大核心域（领域值以中文为主，与 DB primary_tag、过滤展示一致）=====
+  # ========== 农业：子类 → 农业（枚举兜底）==========
+  - id: 种植
+    label: 种植
+    industry_keywords:
+      - 种植业
+      - 种子
+      - 粮食
+
+  - id: 养殖
+    label: 养殖
+    industry_keywords:
+      - 畜禽养殖
+      - 养殖
+      - 饲料
+      - 动物保健
+
+  - id: 渔业
+    label: 渔业
+    industry_keywords:
+      - 渔业
+      - 水产
+
+  - id: 林业
+    label: 林业
+    industry_keywords:
+      - 林业
+
   - id: 农业
     label: 农业
     industry_keywords:
       - 农林牧渔
-      - 种植
-      - 养殖
-      - 饲料
-      - 种子
-      - 林业
-      - 渔业
-    # revenue_ratio 实际存储的是"毛利率"而非"主营营收占比"，
-    # 高毛利行业（医疗器械 60%、化妆品 80%）会误触发，因此不设阈值。
+      - 农业
+
+  # ========== 科技：子类 → 科技（枚举兜底）==========
+  - id: 半导体
+    label: 半导体
+    industry_keywords:
+      - 半导体
+      - 集成电路
+      - 芯片
+
+  - id: 消费电子
+    label: 消费电子
+    industry_keywords:
+      - 消费电子
+      - 光学光电子
+      - 元件
+
+  - id: 计算机
+    label: 计算机
+    industry_keywords:
+      - 计算机
+      - 软件开发
+      - 软件
+      - IT服务
+
+  - id: 通信
+    label: 通信
+    industry_keywords:
+      - 通信
+      - 通信设备
+
+  - id: 互联网
+    label: 互联网
+    industry_keywords:
+      - 互联网
 
   - id: 科技
     label: 科技
     industry_keywords:
       - 电子
-      - 计算机
-      - 通信
-      - 半导体
-      - 软件
-      - IT服务
-      - 互联网
       - 物联网
       - 云计算
       - 人工智能
-    # 注意：rnd_ratio 字段实际存储的是"三费占比"而非研发投入占比，
-    # 因此不再用 rnd_ratio_threshold 做判定，纯靠行业关键词。
 
+  # ========== 宏观/周期：子类 → 有色金属 → 宏观（枚举+商品占比兜底）==========
+  - id: 煤炭
+    label: 煤炭
+    industry_keywords:
+      - 煤炭
+
+  - id: 钢铁
+    label: 钢铁
+    industry_keywords:
+      - 钢铁
+
+  - id: 石油石化
+    label: 石油石化
+    industry_keywords:
+      - 石油石化
+      - 油气
+      - 油服
+
+  - id: 贵金属
+    label: 贵金属
+    industry_keywords:
+      - 贵金属
+      - 黄金
+
+  - id: 能源金属
+    label: 能源金属
+    industry_keywords:
+      - 能源金属
+      - 稀土
+
+  - id: 工业金属
+    label: 工业金属
+    industry_keywords:
+      - 工业金属
+      - 铜
+      - 铝
+
+  - id: 小金属
+    label: 小金属
+    industry_keywords:
+      - 小金属
+
+  # 宽口径「宏观」枚举（GEO）：须保留「有色金属」关键词，与单测 601899 及周期品兜底一致
   - id: 宏观
     label: 宏观
     industry_keywords:
       - 有色金属
-      - 石油石化
-      - 工业金属
-      - 小金属
-      - 煤炭
-      - 钢铁
-      - 贵金属
-      - 能源金属
+      - 基础化工
+      - 化工
+      - 农化制品
+      - 农化
     commodity_revenue_ratio_threshold: 0.5
 
-  # ===== 行业域 =====
+  # ========== 国防军工 ==========
+  - id: 航天装备
+    label: 航天装备
+    industry_keywords:
+      - 航天装备
+
+  - id: 航空装备
+    label: 航空装备
+    industry_keywords:
+      - 航空装备
+
+  - id: 船舶
+    label: 船舶
+    industry_keywords:
+      - 船舶
+      - 航海装备
+
+  - id: 兵器
+    label: 兵器
+    industry_keywords:
+      - 地面兵装
+      - 兵器
+
+  - id: 军工电子
+    label: 军工电子
+    industry_keywords:
+      - 军工电子
+
   - id: 国防军工
     label: 国防军工
     industry_keywords:
       - 国防军工
-      - 航天装备
-      - 航空装备
       - 军工
-      - 航天
-      - 航空
+
+  # ========== 医药生物 ==========
+  - id: 化学制药
+    label: 化学制药
+    industry_keywords:
+      - 化学制药
+
+  - id: 中药
+    label: 中药
+    industry_keywords:
+      - 中药
+
+  - id: 生物制品
+    label: 生物制品
+    industry_keywords:
+      - 生物制品
+
+  - id: 医疗器械
+    label: 医疗器械
+    industry_keywords:
+      - 医疗器械
+
+  - id: 医疗服务
+    label: 医疗服务
+    industry_keywords:
+      - 医疗服务
+
+  - id: 医药商业
+    label: 医药商业
+    industry_keywords:
+      - 医药商业
 
   - id: 医药生物
     label: 医药生物
     industry_keywords:
       - 医药生物
-      - 医疗器械
-      - 医疗服务
-      - 生物制品
-      - 化学制药
-      - 中药
-      - 医药商业
+
+  # ========== 电力设备（制造侧；勿用单独「风电」以免与电力运营混淆）==========
+  - id: 光伏
+    label: 光伏
+    industry_keywords:
+      - 光伏
+      - 电池片
+
+  - id: 锂电
+    label: 锂电
+    industry_keywords:
+      - 锂电池
+      - 锂电
+      - 电池
+
+  - id: 储能
+    label: 储能
+    industry_keywords:
+      - 储能
+
+  - id: 电网设备
+    label: 电网设备
+    industry_keywords:
+      - 电网
+      - 输变电
+
+  - id: 风电设备
+    label: 风电设备
+    industry_keywords:
+      - 风电设备
+      - 风电零部件
 
   - id: 电力设备
     label: 电力设备
     industry_keywords:
       - 电力设备
-      - 光伏
-      - 电池
-      - 储能
-      - 风电
-      - 电网
+      - 电机
 
-  - id: 金融
-    label: 金融
+  # ========== 汽车（自消费拆分）==========
+  - id: 汽车整车
+    label: 汽车整车
     industry_keywords:
-      - 银行
-      - 保险
-      - 证券
-      - 信托
-      - 多元金融
+      - 汽车整车
+      - 乘用车
+      - 商用车
+
+  - id: 汽车零部件
+    label: 汽车零部件
+    industry_keywords:
+      - 汽车零部件
+      - 汽车服务
+
+  # ========== 消费（含汽车兜底）==========
+  - id: 白酒
+    label: 白酒
+    industry_keywords:
+      - 白酒
+
+  - id: 食品饮料
+    label: 食品饮料
+    industry_keywords:
+      - 食品饮料
+      - 食品加工
+      - 休闲食品
+      - 乳品
+      - 饮料
+
+  - id: 家电
+    label: 家电
+    industry_keywords:
+      - 家电
+      - 白色家电
+      - 黑色家电
+
+  - id: 纺织服装
+    label: 纺织服装
+    industry_keywords:
+      - 纺织服装
+      - 纺织
+      - 服装
+
+  - id: 家居
+    label: 家居
+    industry_keywords:
+      - 家居
+      - 家具
+
+  - id: 化妆品
+    label: 化妆品
+    industry_keywords:
+      - 化妆品
+      - 个护
 
   - id: 消费
     label: 消费
     industry_keywords:
-      - 化妆品
-      - 食品饮料
-      - 白酒
-      - 家电
-      - 纺织服装
       - 汽车
-      - 家居
+
+  # ========== 金融 ==========
+  - id: 银行
+    label: 银行
+    industry_keywords:
+      - 银行
+
+  - id: 保险
+    label: 保险
+    industry_keywords:
+      - 保险
+
+  - id: 证券
+    label: 证券
+    industry_keywords:
+      - 证券
+
+  - id: 信托
+    label: 信托
+    industry_keywords:
+      - 信托
+
+  - id: 多元金融
+    label: 多元金融
+    industry_keywords:
+      - 多元金融
+      - 非银金融
+
+  - id: 金融
+    label: 金融
+    industry_keywords:
+      - 金融
+
+  # ========== 传媒 ==========
+  - id: 游戏
+    label: 游戏
+    industry_keywords:
+      - 游戏
+
+  - id: 影视
+    label: 影视
+    industry_keywords:
+      - 影视
+      - 院线
+
+  - id: 广告
+    label: 广告
+    industry_keywords:
+      - 广告
+      - 营销
 
   - id: 传媒
     label: 传媒
     industry_keywords:
       - 传媒
-      - 广告
-      - 游戏
-      - 影视
+
+  # ========== 机械设备 ==========
+  - id: 工程机械
+    label: 工程机械
+    industry_keywords:
+      - 工程机械
+
+  - id: 通用设备
+    label: 通用设备
+    industry_keywords:
+      - 通用设备
+
+  - id: 专用设备
+    label: 专用设备
+    industry_keywords:
+      - 专用设备
+
+  - id: 自动化
+    label: 自动化
+    industry_keywords:
+      - 自动化
+      - 工控
 
   - id: 机械设备
     label: 机械设备
     industry_keywords:
       - 机械设备
-      - 工程机械
-      - 通用设备
-      - 专用设备
-      - 自动化
+
+  # ========== 环保 ==========
+  - id: 环境治理
+    label: 环境治理
+    industry_keywords:
+      - 环境治理
 
   - id: 环保
     label: 环保
     industry_keywords:
       - 环保
-      - 环境治理
+
+  # ========== 公用事业运营（风力发电 等；不用单独「风电」关键词）==========
+  - id: 火电
+    label: 火电
+    industry_keywords:
+      - 火电
+      - 火力发电
+      - 燃煤发电
+      - 热电
+
+  - id: 水电
+    label: 水电
+    industry_keywords:
+      - 水电
+      - 水力发电
+
+  - id: 核电
+    label: 核电
+    industry_keywords:
+      - 核电
+      - 核能
+
+  - id: 风电运营
+    label: 风电
+    industry_keywords:
+      - 风力发电
+
+  # 新能源运营侧（须在「公用事业」「电力运营」之前；与上方「光伏」设备区分：靠「发电」等运营词）
+  - id: 新能源发电
+    label: 新能源发电
+    industry_keywords:
+      - 新能源发电
+      - 光伏发电
+      - 太阳能发电
+      - 光热发电
+      - 垃圾发电
+      - 生物质能
+      - 电能综合服务
+
+  - id: 燃气
+    label: 燃气
+    industry_keywords:
+      - 燃气
+
+  - id: 热力
+    label: 热力
+    industry_keywords:
+      - 热力
+      - 供热
+
+  # 申万常见「电力及公用事业」整段名，优先于裸「电力」兜底
+  - id: 公用事业
+    label: 公用事业
+    industry_keywords:
+      - 公用事业
+      - 电力及公用事业
+      - 水务
+
+  # 注意：不再对单独关键词「电力」做 YAML 兜底，避免「电力综合/电力运营」式粗标签；申万仅为「电力」时在 semantic.py 中按主营披露映射。
+
+  # ========== 综合与其它申万常见一级（标的池扩展时仍适用）==========
+  - id: 交通运输
+    label: 交通运输
+    industry_keywords:
+      - 交通运输
+      - 航空机场
+      - 机场
+      - 航运港口
+      - 港口
+      - 铁路公路
+      - 物流
+      - 快递
+
+  - id: 房地产
+    label: 房地产
+    industry_keywords:
+      - 房地产
+      - 房地产开发
+      - 房地产服务
+
+  - id: 建筑装饰
+    label: 建筑装饰
+    industry_keywords:
+      - 建筑装饰
+      - 装修装饰
+
+  - id: 建筑材料
+    label: 建筑材料
+    industry_keywords:
+      - 建筑材料
+      - 水泥
+      - 玻璃
+      - 耐火材料
+      - 管材
+
+  - id: 商贸零售
+    label: 商贸零售
+    industry_keywords:
+      - 商贸零售
+      - 商业贸易
+      - 一般零售
+      - 专业连锁
+
+  - id: 社会服务
+    label: 社会服务
+    industry_keywords:
+      - 社会服务
+      - 教育
+      - 酒店
+      - 餐饮
+      - 旅游
+
+  - id: 轻工制造
+    label: 轻工制造
+    industry_keywords:
+      - 轻工制造
+      - 造纸
+      - 包装
+
+  - id: 美容护理
+    label: 美容护理
+    industry_keywords:
+      - 美容护理
+      - 医美
+
+  - id: 农产品加工
+    label: 农产品加工
+    industry_keywords:
+      - 农产品加工
 
 unknown:
   default_confidence: 0.5

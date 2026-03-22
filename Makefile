@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production query-ingest-overview check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast fetch-sector-symbols deps-ingest build-images build-module-a deps-classifier deps-scanner diting prod run-module-a query-module-a-output init-l2-classifier-table run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table init-l2-symbol-names-table test-scanner
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production query-ingest-overview check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast fetch-sector-symbols deps-ingest ingest-business-profile build-images build-module-a deps-classifier deps-scanner deps-scanner-alphalens diting prod run-module-a query-module-a-output init-l2-classifier-table init-l2-industry-revenue-table init-l2-business-profile-tables init-l2-b-module-tables run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table prune-l2-quant-scan-all factor-quality-smoke init-l2-symbol-names-table sync-symbol-names-csv test-scanner golden-scanner-batch run-module-c query-module-c-output verify-module-c init-l2-moe-opinion-table test-moe deps-moe
 
 # 采集相关 target 使用的 Python：akshare 推荐 >= 3.9。Make 解析时用非交互 shell，需先加载 pyenv 才能找到 pyenv 安装的 3.9
 PYTHON_INGEST := $(shell export PYENV_ROOT="$$HOME/.pyenv" && [ -d "$$PYENV_ROOT/bin" ] && export PATH="$$PYENV_ROOT/bin:$$PATH" && eval "$$(pyenv init - 2>/dev/null)" 2>/dev/null; command -v python3.11 2>/dev/null || command -v python3.10 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3.8 2>/dev/null || command -v python3 2>/dev/null)
@@ -17,7 +17,13 @@ deps-scanner:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && { echo "错误: 未找到 python3.8/python3.9/python3"; exit 1; }; \
 	echo "使用 $$py 安装扫描引擎依赖..."; \
-	cd "$$root" && $$py -m pip install -r requirements-scanner.txt && $$py -m pip install pytest -q && echo "deps-scanner OK（可执行 make run-module-b / make verify-module-b / make test-scanner）"
+	cd "$$root" && $$py -m pip install -r requirements-scanner.txt && $$py -m pip install pytest -q && echo "deps-scanner OK（可执行 make run-module-b / make verify-module-b / make test-scanner）。若 L2 报缺表：make init-l2-b-module-tables"
+
+# Alphalens 因子烟测可选依赖（见 requirements-scanner-alphalens.txt 内 Peewee 说明）；不影响主扫描链
+deps-scanner-alphalens:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && $$py -m pip install -r requirements-scanner-alphalens.txt && echo "deps-scanner-alphalens OK（可 make factor-quality-smoke）"
 
 # Stage2-06 采集依赖（真实行情）：akshare、psycopg2、redis 等；06_ 步骤 3、7、8 执行前须先 make deps-ingest。akshare 要求 >= 3.8（3.9+ 无告警，若系统有 3.9+ 会优先用）
 # 先装 akshare --no-deps 再装 core 依赖，避免 akshare 1.18+ 的 curl_cffi>=0.13 与部分环境不兼容
@@ -200,7 +206,10 @@ build-module-b:
 # Stage3-01 一键本地运行 A 模块：加载 .env，执行分类，输出执行标的、执行结果、写入位置 [Ref: 01_语义分类器_实践]
 run-module-a:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	_saved_ds="$$DITING_SYMBOLS"; _saved_mab="$$MODULE_AB_SYMBOLS"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	if [ -n "$$_saved_ds" ]; then export DITING_SYMBOLS="$$_saved_ds"; fi; \
+	if [ -n "$$_saved_mab" ]; then export MODULE_AB_SYMBOLS="$$_saved_mab"; fi; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/run_module_a_local.py
 
 # Stage3-01 一键查询 A 模块写入的数据：L2 表 classifier_output_snapshot（需 PG_L2_DSN 可达）[Ref: 01_语义分类器_实践]
@@ -215,7 +224,33 @@ init-l2-classifier-table:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_classifier_table.py
 
-# Stage3-02 一键本地运行 B 模块：基于 A 同源标的执行扫描，结果写入 L2 quant_signal_snapshot 供 Module C 使用 [Ref: 02_量化扫描引擎_实践]（需先 make deps-scanner）
+# Stage3-02 在 L2 库中创建 industry_revenue_summary（若不存在）；板块强度/行业映射与 Module A 同源 [Ref: 11_数据采集与输入层规约]
+init-l2-industry-revenue-table:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/init_l2_industry_revenue_summary.py
+
+# L2：segment_registry + symbol_business_profile（主营构成，Module A segment_shares）[Ref: 12_右脑数据支撑与Segment规约]
+init-l2-business-profile-tables:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_business_profile_tables.py
+
+# 主营构成批量入库（AkShare stock_zygc_em → L2）；申万「电力」等须依赖本数据才可不标未知。须 make deps-ingest；可选 INGEST_BUSINESS_BATCH_PAUSE_SEC
+# 注意：先保存命令行传入的 DITING_SYMBOLS，再 source .env，避免 .env 内 DITING_SYMBOLS 覆盖本次显式指定
+ingest-business-profile:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	_saved_ds="$$DITING_SYMBOLS"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	if [ -n "$$_saved_ds" ]; then export DITING_SYMBOLS="$$_saved_ds"; fi; \
+	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_business_profile_batch.py
+
+# B 模块常用 L2 表：分类器快照、量化快照、行业汇总、主营构成（按需执行，首次连库或报 relation does not exist 时）
+init-l2-b-module-tables: init-l2-classifier-table init-l2-quant-signal-table init-l2-industry-revenue-table init-l2-business-profile-tables
+	@echo "init-l2-b-module-tables OK（classifier_output_snapshot / quant_signal_* / industry_revenue_summary / segment_registry+symbol_business_profile）"
+
+# Stage3-02 一键本地运行 B 模块：基于 A 同源标的执行扫描，结果写入 L2 quant_signal_snapshot 供 Module C 使用 [Ref: 02_量化扫描引擎_实践]（需先 make deps-scanner；L2 缺表时 make init-l2-b-module-tables）
 # macOS：Homebrew 安装的 ta-lib 为 libta-lib.dylib，Python 包需 libta_lib；若存在 .ta_lib_link 则加入 DYLD_LIBRARY_PATH
 run-module-b:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
@@ -225,11 +260,16 @@ run-module-b:
 	cd "$$root" && PYTHONPATH="$$root" $$py scripts/run_module_b_local.py
 
 # Stage3-02 一键查询 B 模块写入的数据：L2 表 quant_signal_snapshot（需 PG_L2_DSN 可达）[Ref: 02_量化扫描引擎_实践]
+# 可选位置参数：make query-module-b-output 3-22（日历日，与 QUERY_SCANNER_DATE 等价）；QUERY_SCANNER_BATCH_INDEX=1 取当日倒数第二批
 query-module-b-output:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
-	cd "$$root" && PYTHONPATH="$$root" $$py scripts/query_scanner_output.py
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/query_scanner_output.py $(filter-out $@,$(MAKECMDGOALS))
+
+# 吞掉「make query-module-b-output 3-22」中额外目标（如 3-22），避免 No rule to make target
+%:
+	@:
 
 # Stage3-02 B 模块功能验证：基于 A 同源标的跑扫描，校验输出格式与 L2 写入、是否符合预期 [Ref: 02_量化扫描引擎_实践]
 # B 模块功能验证：默认用 Mock OHLCV 与跳过 akshare 补全，保证无库/无外网时可跑通；需真实 L1 时取消下一行注释并设 TIMESCALE_DSN
@@ -247,6 +287,19 @@ init-l2-quant-signal-table:
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
 	cd "$$root" && PYTHONPATH="$$root" $$py scripts/init_l2_quant_signal_table.py
 
+# 按保留天数裁剪 L2 quant_signal_scan_all（需 PG_L2_DSN）；示例: make prune-l2-quant-scan-all EXTRA='--dry-run'
+prune-l2-quant-scan-all:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/prune_quant_signal_scan_all.py $(EXTRA)
+
+# Alphalens 因子分层管线烟测（无 alphalens 则 exit 0）；可选依赖见 requirements-scanner-alphalens.txt / make deps-scanner-alphalens
+factor-quality-smoke:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/factor_quality_smoke.py
+
 # Stage3-02 在 L2 库中创建 symbol_names 表（标的中文名持久化）；优先从该表读，缺失时 akshare 拉取并落库
 init-l2-symbol-names-table:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
@@ -254,11 +307,60 @@ init-l2-symbol-names-table:
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
 	cd "$$root" && PYTHONPATH="$$root" $$py scripts/init_l2_symbol_names_table.py
 
-# Stage3-02 扫描引擎单测 [Ref: 02_量化扫描引擎_实践]
+# 将 config/symbol_names.csv 同步到 L2 symbol_names（关闭 INGEST_SYMBOL_NAMES 时手工维护 CSV 后用）[Ref: 02_量化扫描引擎_实践]
+sync-symbol-names-csv:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/sync_symbol_names_csv_to_l2.py
+
+# Stage3-04 Module C：pytest（MoE 议会）[Ref: 04_A轨_MoE议会_实践]
+test-moe:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	cd "$$root" && PYTHONPATH="$$root" python3 -m pytest tests/unit/test_moe.py tests/unit/test_b_track.py -v --tb=short
+
+# Module C 与 B 共用 TA-Lib 扫描链；一键跑 C 前请先 make deps-scanner
+deps-moe: deps-scanner
+	@echo "deps-moe OK（同 deps-scanner，可 make run-module-c）"
+
+# Stage3-04 在 L2 创建 moe_expert_opinion_snapshot（Module C 输出表）
+init-l2-moe-opinion-table:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_moe_expert_opinion_table.py
+
+# Stage3-04 一键运行 C（唯一入口）。已配 PG_L2_DSN 且未设 MOE_PIPELINE 时默认从 L2 读 A+B；本机当场重算 B 请 export MOE_PIPELINE=full（须 TIMESCALE_DSN、deps-scanner）
+run-module-c:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	[ -d "$$root/.ta_lib_link" ] && export DYLD_LIBRARY_PATH="$$root/.ta_lib_link:/opt/homebrew/opt/ta-lib/lib:$${DYLD_LIBRARY_PATH:-}"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && MOE_STUB_SEGMENT_SIGNALS=1 PYTHONPATH="$$root" $$py scripts/run_module_c_local.py
+
+# Stage3-04 一键查询 C 写入：L2 moe_expert_opinion_snapshot
+query-module-c-output:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/query_module_c_output.py
+
+# Stage3-04 C 模块烟测：MoE 单测 + Golden batch（不跑全量 A/B）
+verify-module-c:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py -m pytest tests/unit/test_moe.py tests/unit/test_b_track.py -q --tb=line && \
+	PYTHONHASHSEED=0 env -u PG_L2_DSN -u TIMESCALE_DSN PYTHONPATH="$$root" $$py scripts/golden_scanner_batch.py
+
+# Stage3-02 扫描引擎单测 [Ref: 02_量化扫描引擎_实践]；PYTHONHASHSEED=0 保证 mock OHLCV 与 Golden batch 可复现
 test-scanner:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
-	cd "$$root" && PYTHONPATH="$$root" $$py -m pytest tests/unit/test_scanner.py -v --tb=short
+	cd "$$root" && PYTHONHASHSEED=0 PYTHONPATH="$$root" $$py -m pytest tests/unit/test_scanner.py tests/unit/test_sector_strength.py tests/unit/test_golden_scanner_batch.py -v --tb=short
+
+# Golden batch：固定标的 + 分数区间（须无 PG_L2_DSN/TIMESCALE_DSN，与 test_golden_scanner_batch 一致）
+golden-scanner-batch:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONHASHSEED=0 env -u PG_L2_DSN -u TIMESCALE_DSN PYTHONPATH="$$root" $$py scripts/golden_scanner_batch.py
 
 # 构建并推送到 ACR（密码取 Makefile 中 DITING_ACR_PASSWORD 或环境变量）
 push-images: build-images

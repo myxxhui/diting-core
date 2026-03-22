@@ -77,22 +77,52 @@ def main():
         print("  最近批次汇总:")
         for batch_id, cnt, created in rows:
             print("    batch_id=%s, 行数=%s, 最新写入=%s" % (batch_id, cnt, _format_time_utf8(created)))
-        # 最新一批的明细（最多 30 条）
-        cur.execute("""
-            SELECT id, batch_id, symbol, primary_tag, primary_confidence, created_at
-            FROM classifier_output_snapshot
-            ORDER BY created_at DESC
-            LIMIT 30
-        """)
-        detail = cur.fetchall()
+        # 最新一批的明细（最多 30 条）；含 segment_shares_json 时需先 make init-l2-classifier-table 升级列
+        try:
+            cur.execute("""
+                SELECT id, batch_id, symbol, primary_tag, primary_confidence,
+                       segment_shares_json, created_at
+                FROM classifier_output_snapshot
+                ORDER BY created_at DESC
+                LIMIT 30
+            """)
+            detail = cur.fetchall()
+            has_seg = True
+        except Exception:
+            cur.execute("""
+                SELECT id, batch_id, symbol, primary_tag, primary_confidence, created_at
+                FROM classifier_output_snapshot
+                ORDER BY created_at DESC
+                LIMIT 30
+            """)
+            detail = cur.fetchall()
+            has_seg = False
         print()
         print("  最新写入明细（最多 30 条）:")
-        print("    %-6s %-36s %-12s %-8s %-6s %s" % ("id", "batch_id", "symbol", "primary_tag", "conf", "created_at"))
-        print("    " + "-" * 90)
+        print("    %-6s %-24s %-12s %-8s %-6s %s" % ("id", "batch_id", "symbol", "primary_tag", "conf", "created_at"))
+        print("    " + "-" * 100)
         for r in detail:
-            rid, bid, sym, tag, conf, created = r
-            bid_short = (bid or "")[:32] + ".." if len(bid or "") > 34 else (bid or "")
-            print("    %-6s %-36s %-12s %-8s %.2f   %s" % (rid, bid_short, sym or "", tag or "", conf or 0, _format_time_utf8(created)))
+            if has_seg:
+                rid, bid, sym, tag, conf, segj, created = r
+            else:
+                rid, bid, sym, tag, conf, created = r
+                segj = None
+            bid_short = (bid or "")[:22] + ".." if len(bid or "") > 24 else (bid or "")
+            seg_hint = ""
+            if segj:
+                try:
+                    import json as _json
+                    if isinstance(segj, str):
+                        arr = _json.loads(segj)
+                    else:
+                        arr = segj
+                    seg_hint = "; seg_n=%s" % len(arr) if isinstance(arr, list) else ""
+                except Exception:
+                    seg_hint = ""
+            print(
+                "    %-6s %-24s %-12s %-8s %.2f   %s%s"
+                % (rid, bid_short, sym or "", tag or "", conf or 0, _format_time_utf8(created), seg_hint)
+            )
         cur.close()
         conn.close()
         print()

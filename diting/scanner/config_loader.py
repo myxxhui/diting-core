@@ -105,6 +105,9 @@ def get_optimization_params(config: Optional[Dict[str, Any]] = None) -> Dict[str
     fw = o.get("fusion_weights") or [0.7, 0.2, 0.1]
     if not isinstance(fw, (list, tuple)) or len(fw) < 3:
         fw = [0.7, 0.2, 0.1]
+    cs = o.get("coarse_screen") or {}
+    if not isinstance(cs, dict):
+        cs = {}
     return {
         "trend_confirm_bars": int(o.get("trend_confirm_bars", 3)),
         "breakout_confirm_bars": int(o.get("breakout_confirm_bars", 2)),
@@ -135,6 +138,13 @@ def get_optimization_params(config: Optional[Dict[str, Any]] = None) -> Dict[str
         "multi_pool_tier2_threshold": float(o.get("multi_pool_tier2_threshold", 60)),
         "multi_pool_tier2_bonus": float(o.get("multi_pool_tier2_bonus", 5)),
         "output_score_percentile": bool(o.get("output_score_percentile", True)),
+        "coarse_screen": {
+            "enabled": bool(cs.get("enabled", False)),
+            "min_momentum_percentile": float(cs.get("min_momentum_percentile", 0.0)),
+            "min_liquidity_percentile": float(cs.get("min_liquidity_percentile", 0.0)),
+        },
+        "signal_cooldown_days": int(o.get("signal_cooldown_days", 0)),
+        "signal_cooldown_confirmed_only": bool(o.get("signal_cooldown_confirmed_only", True)),
     }
 
 
@@ -151,6 +161,91 @@ def get_long_term_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, A
     }
 
 
+def get_scanner_performance_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """并行扫描阈值、结构化 metrics 日志开关。见 02 规约 §3.9。"""
+    if config is None:
+        config = load_scanner_config()
+    engine = config.get("module_b_quant_engine") or {}
+    sp = engine.get("scanner_performance") or {}
+    if not isinstance(sp, dict):
+        sp = {}
+    return {
+        "parallel_workers": max(0, int(sp.get("parallel_workers", 0))),
+        "min_symbols_for_parallel": max(1, int(sp.get("min_symbols_for_parallel", 48))),
+        "metrics_log_json": bool(sp.get("metrics_log_json", True)),
+    }
+
+
+def get_product_signals_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """下游契约：是否在每条信号上附带 market_regime 等。见 02 规约 §4。"""
+    if config is None:
+        config = load_scanner_config()
+    engine = config.get("module_b_quant_engine") or {}
+    ps = engine.get("product_signals") or {}
+    if not isinstance(ps, dict):
+        ps = {}
+    return {
+        "emit_market_regime_per_row": bool(ps.get("emit_market_regime_per_row", True)),
+        "emit_scanner_metrics_log": bool(ps.get("emit_scanner_metrics_log", True)),
+    }
+
+
+def get_a_track_short_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    A 轨短线（技术面）扫描模式：signal_profile 切换预警/灵敏度/胜率倾向；与三轨制文档中的「B 轨中线」区分。
+    返回 alert/confirmed 阈值、optimization 覆盖、合并后的 scanner 段、风控默认。
+    """
+    if config is None:
+        config = load_scanner_config()
+    engine = config.get("module_b_quant_engine") or {}
+    ats = engine.get("a_track_short") or {}
+    scanner = dict(engine.get("scanner") or {})
+    profile = str(ats.get("signal_profile", "balanced")).strip().lower()
+    profiles = ats.get("profiles") or {}
+    prof: Dict[str, Any] = {}
+    if isinstance(profiles, dict):
+        prof = dict(profiles.get(profile) or {})
+
+    merged_scanner = {**scanner, **(prof.get("scanner") or {})}
+    opt_ov = prof.get("optimization") or {}
+    if not isinstance(opt_ov, dict):
+        opt_ov = {}
+
+    default_t = int(scanner.get("technical_score_threshold", 70))
+    conf_raw = merged_scanner.get("technical_score_threshold", default_t)
+    confirmed_t = int(conf_raw) if conf_raw is not None else default_t
+
+    alert_t = prof.get("alert_technical_score_threshold")
+    if alert_t is None:
+        alert_t = ats.get("alert_technical_score_threshold")
+    if alert_t is None:
+        alert_t = max(40, confirmed_t - 15)
+    alert_t = int(alert_t)
+
+    dual_tier = bool(ats.get("dual_tier_output", True))
+    risk = ats.get("risk") or {}
+    if not isinstance(risk, dict):
+        risk = {}
+
+    lead = merged_scanner.get("pass_require_lead_pool_min")
+    second = merged_scanner.get("pass_require_second_pool_min")
+    pass_tightening = {
+        "pass_require_lead_pool_min": float(lead) if lead is not None else None,
+        "pass_require_second_pool_min": float(second) if second is not None else None,
+    }
+    return {
+        "signal_profile": profile,
+        "dual_tier": dual_tier,
+        "alert_threshold": alert_t,
+        "confirmed_threshold": confirmed_t,
+        "sector_strength_threshold": float(merged_scanner.get("sector_strength_threshold", 1.0)),
+        "optimization_override": opt_ov,
+        "merged_scanner": merged_scanner,
+        "pass_tightening_override": pass_tightening,
+        "risk": risk,
+    }
+
+
 def get_filters_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """过滤器：板块强度、流动性、波动率 regime；均可选。"""
     if config is None:
@@ -160,8 +255,36 @@ def get_filters_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any
     sector = f.get("sector_strength") or {}
     liq = f.get("liquidity") or {}
     vol = f.get("volatility_regime") or {}
+    ir = f.get("index_regime") or {}
+    if not isinstance(ir, dict):
+        ir = {}
+    cg = f.get("classifier_gate") or {}
+    if not isinstance(cg, dict):
+        cg = {}
     return {
-        "sector_strength": {"enabled": bool(sector.get("enabled", False))},
+        "sector_strength": {
+            "enabled": bool(sector.get("enabled", False)),
+            "mode": str(sector.get("mode", "technical_ratio_to_sector_mean")).strip(),
+            "unmapped_sector_strength": float(sector.get("unmapped_sector_strength", 1.0)),
+        },
+        "index_regime": {
+            "enabled": bool(ir.get("enabled", False)),
+            "benchmark_symbol": str(ir.get("benchmark_symbol", "000300.SH")).strip(),
+            "ma_short": int(ir.get("ma_short", 20)),
+            "ma_long": int(ir.get("ma_long", 60)),
+            "bear_trend_pool_mult": float(ir.get("bear_trend_pool_mult", 0.72)),
+            "stress_vol_enabled": bool(ir.get("stress_vol_enabled", False)),
+            "stress_atr_percentile": float(ir.get("stress_atr_percentile", 0.82)),
+            "stress_breakout_mult": float(ir.get("stress_breakout_mult", 0.88)),
+            "stress_reversion_mult": float(ir.get("stress_reversion_mult", 1.06)),
+            "stress_lookback_bars": int(ir.get("stress_lookback_bars", 60)),
+        },
+        "classifier_gate": {
+            "enabled": bool(cg.get("enabled", False)),
+            "allowed_primary_tags": list(cg.get("allowed_primary_tags") or []),
+            "match_mode": str(cg.get("match_mode", "domain_or_primary") or "domain_or_primary").strip(),
+            "batch_id": cg.get("batch_id"),
+        },
         "liquidity": {
             "enabled": bool(liq.get("enabled", False)),
             "min_score": float(liq.get("min_score", 0)),
