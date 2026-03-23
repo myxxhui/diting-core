@@ -177,16 +177,21 @@ def get_scanner_performance_params(config: Optional[Dict[str, Any]] = None) -> D
 
 
 def get_product_signals_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """下游契约：是否在每条信号上附带 market_regime 等。见 02 规约 §4。"""
+    """下游契约：是否在每条信号上附带 market_regime、win_rate/payoff 等。见 02 规约 §4。"""
     if config is None:
         config = load_scanner_config()
     engine = config.get("module_b_quant_engine") or {}
     ps = engine.get("product_signals") or {}
     if not isinstance(ps, dict):
         ps = {}
+    wr = float(ps.get("win_rate_prediction", 0.7) or 0.7)
+    pr = float(ps.get("payoff_ratio", 2.0) or 2.0)
     return {
         "emit_market_regime_per_row": bool(ps.get("emit_market_regime_per_row", True)),
         "emit_scanner_metrics_log": bool(ps.get("emit_scanner_metrics_log", True)),
+        "emit_win_rate_payoff": bool(ps.get("emit_win_rate_payoff", False)),
+        "win_rate_prediction": max(0.0, min(1.0, wr)),
+        "payoff_ratio": max(0.01, pr),
     }
 
 

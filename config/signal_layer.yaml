@@ -1,0 +1,46 @@
+# [Ref: 06_B轨_信号层生产级数据采集_设计, 04_B轨_C模块右脑与信号设计] 信号层配置
+# 支持 DITING_TRACK=a|b 按轨选择；a=行业+标的新闻，b=周全垂直信号（可扩展适配器）
+
+signal_layer:
+  max_input_chars: 4096
+  ttl_sec: 3600
+  days_back: 7
+  fallback_on_failure: true
+  audit_enabled: false
+  default_track: a
+
+# 顶层默认（track 未覆盖时生效）
+signal_understanding:
+  mode: rule_first_then_ai
+  model_id: ""
+  base_url: ""
+  prompt_path: config/prompts/segment_signal_understanding_v1.md
+  max_input_chars: 4096
+  max_input_tokens: 1024
+  max_output_tokens: 256
+  retry_times: 2
+  retry_backoff_sec: 2
+  timeout_sec: 30
+  model_override_by_tier: {}
+  audit_reuse_same_day: false
+
+# 按轨配置：A 轨=行业+标的新闻+AI，B 轨=周全垂直信号+AI
+tracks:
+  a_track:
+    data_scope: news_and_announcements
+    adapter_prefixes: ["seg_bp_"]
+    understanding:
+      mode: rule_first_then_ai
+      prompt_path: config/prompts/segment_signal_understanding_v1.md
+      max_input_chars: 4096
+  b_track:
+    data_scope: comprehensive_vertical
+    adapter_prefixes: ["seg_bp_"]
+    understanding:
+      mode: rule_first_then_ai
+      prompt_path: config/prompts/segment_signal_understanding_v1.md
+      max_input_chars: 8192
+
+# 按 segment_id 前缀选适配器；seg_bp_* 默认 seg_bp_news
+adapter_by_prefix:
+  seg_bp_: seg_bp_news

@@ -3,7 +3,7 @@
 import json
 import logging
 import uuid
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +28,12 @@ def write_moe_expert_opinion_snapshot(
     rows: List[tuple],
     batch_id: str = "",
     correlation_id: str = "",
+    run_metadata: Optional[Dict[str, Any]] = None,
 ) -> int:
     """
     写入 L2 表 moe_expert_opinion_snapshot。
     :param rows: [(symbol, List[ExpertOpinion]), ...]
+    :param run_metadata: 单行写入元数据（stub、batch 对齐、pipeline 等）；每行相同，便于下游按批过滤。
     """
     if not rows or not dsn:
         return 0
@@ -42,6 +44,7 @@ def write_moe_expert_opinion_snapshot(
         return 0
     batch_id = batch_id or str(uuid.uuid4())
     correlation_id = correlation_id or batch_id
+    meta_json = json.dumps(run_metadata or {}, ensure_ascii=False)
     sql_rows = []
     for sym, opinions in rows:
         payload = [expert_opinion_to_dict(o) for o in (opinions or [])]
@@ -51,6 +54,7 @@ def write_moe_expert_opinion_snapshot(
                 str(sym).strip().upper(),
                 json.dumps(payload, ensure_ascii=False),
                 correlation_id,
+                meta_json,
             )
         )
     try:
@@ -60,8 +64,8 @@ def write_moe_expert_opinion_snapshot(
             cur.executemany(
                 """
                 INSERT INTO moe_expert_opinion_snapshot
-                (batch_id, symbol, opinions_json, correlation_id)
-                VALUES (%s, %s, %s::jsonb, %s)
+                (batch_id, symbol, opinions_json, correlation_id, moe_run_metadata)
+                VALUES (%s, %s, %s::jsonb, %s, %s::jsonb)
                 """,
                 sql_rows,
             )

@@ -9,6 +9,8 @@ import yaml
 
 from diting.protocols.brain_pb2 import ExpertOpinion
 
+from diting.protocols.brain_pb2 import TIME_HORIZON_MEDIUM_TERM, TIME_HORIZON_SHORT_TERM
+
 from diting.moe.experts import unified_opinion, trash_bin_opinion
 from diting.moe.vc_agent import vc_agent_opinion
 
@@ -84,20 +86,22 @@ def route_and_collect_opinions(
     segment_signals: Optional[Dict[str, Any]] = None,
     enable_vc_agent: bool = True,
     config: Optional[Dict[str, Any]] = None,
+    track: str = "a",
 ) -> List[ExpertOpinion]:
     """
     按股配置 + 统一分析：每标的一条意见。
+    - track=b 时 unified_opinion 输出 horizon=MEDIUM_TERM；track=a 时 SHORT_TERM。
     - 若 enable_vc_agent 且 quant_signal 为 long_term_candidate，可追加 VC-Agent 意见（LONG_TERM）。
-    - 短轨：domain_tags 中首个命中 supported_tags 的标签走 unified_opinion；否则查 moe_router.tag_to_router_domain；
-      仍无则可选 unmapped_router_domain；皆无则返回一条「不支持」。
+    - 短轨：domain_tags 中首个命中 supported_tags 的标签走 unified_opinion；否则查 tag_to_router_domain。
     """
     opinions: List[ExpertOpinion] = []
     quant_signal = quant_signal or {}
     segment_list = segment_list or []
     segment_signals = segment_signals or {}
     cfg = config if config is not None else _load_moe_config()
+    horizon = TIME_HORIZON_MEDIUM_TERM if str(track or "").strip().lower() == "b" else TIME_HORIZON_SHORT_TERM
 
-    if enable_vc_agent and quant_signal.get("long_term_candidate"):
+    if enable_vc_agent and quant_signal.get("long_term_candidate") and str(track or "").strip().lower() != "b":
         try:
             op = vc_agent_opinion(symbol, quant_signal=quant_signal, enable_long_term=True)
             opinions.append(op)
@@ -112,7 +116,8 @@ def route_and_collect_opinions(
         return opinions
 
     op = unified_opinion(
-        symbol, quant_signal, segment_list, segment_signals, cfg, domain_tag=first_supported_tag
+        symbol, quant_signal, segment_list, segment_signals, cfg, domain_tag=first_supported_tag,
+        horizon=horizon,
     )
     opinions.append(op)
     return opinions

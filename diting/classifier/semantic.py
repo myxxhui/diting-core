@@ -40,33 +40,44 @@ def refine_power_label_from_disclosure(name_cn: str) -> Optional[str]:
     s = (name_cn or "").strip()
     if len(s) < 2:
         return None
-    # 更具体优先（与披露常见表述对齐）
+    # 更具体优先；映射结果需贴切、可区分（避免过分精简）
     if any(k in s for k in ("抽水蓄能", "蓄能电站")):
-        return "水电"
+        return "水力发电"
     if any(k in s for k in ("水力", "水电", "水利发电")):
-        return "水电"
+        return "水力发电"
     if any(k in s for k in ("火力", "燃煤", "煤电", "热电联产", "热电", "火电")):
-        return "火电"
+        return "火力发电"
     if any(k in s for k in ("核电", "核能", "核力")):
         return "核电"
-    if any(k in s for k in ("风电", "风力发电", "风力")):
-        return "风电"
+    if any(k in s for k in ("风电", "风力发电", "风力", "风电运营", "风电场", "风力发电运营")):
+        return "风力发电"
     if any(k in s for k in ("太阳能", "光伏发电", "光伏", "光热发电", "垃圾发电", "生物质", "新能源发电")):
         return "新能源发电"
     if any(k in s for k in ("清洁能源", "绿电", "可再生能源")):
         return "新能源发电"
     if "燃气" in s:
-        return "燃气"
-    if any(k in s for k in ("热力", "供热", "供暖")):
-        return "热力"
-    if "售电" in s or any(k in s for k in ("电力销售", "供电业务", "供电服务")):
-        return "售电"
-    if any(k in s for k in ("配电", "输配电", "配电网")):
+        return "燃气供应"
+    if any(k in s for k in ("热力", "供热", "供暖", "蒸汽销售", "蒸汽")):
+        return "热力供应"
+    if "售电" in s or any(k in s for k in ("电力销售", "供电业务", "供电服务", "销售电力", "售电收入", "电力产品销售")):
+        return "售电业务"
+    if any(k in s for k in ("配电", "输配电", "配电网", "电网配电")):
         return "配电运营"
     if any(k in s for k in ("输电", "电网运营", "电网建设")):
         return "电网运营"
     if "综合能源" in s:
         return "综合能源服务"
+    if any(k in s for k in ("电力销售", "电力供应", "售电业务", "供电")):
+        return "售电业务"
+    if any(k in s for k in ("电力生产", "发电业务", "发电量", "发电-电力", "发电", "电力生产销售")):
+        return "发电与供电业务"
+    if any(k in s for k in ("储能", "储能系统")):
+        return "储能业务"
+    if any(k in s for k in ("电力分部", "电力板块", "电力业务")):
+        return "发电与供电业务"
+    # 裸「电力」兜底（申万仅电力且披露无细分时）
+    if s == "电力":
+        return "发电与供电业务"
     return None
 
 

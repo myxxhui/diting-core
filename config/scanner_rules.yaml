@@ -114,6 +114,10 @@ module_b_quant_engine:
   product_signals:
     emit_market_regime_per_row: true
     emit_scanner_metrics_log: true
+    # 胜率/盈亏比：供 D 判官凯利计算；默认关闭；开启时输出占位值（未来可由回测填充）
+    emit_win_rate_payoff: false
+    win_rate_prediction: 0.7
+    payoff_ratio: 2.0
   filters:
     # 板块强度：同行业 technical_score 截面均值比；数据源 L2 industry_revenue_summary（与 Module A 同源）
     sector_strength:

@@ -4,7 +4,11 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from diting.protocols.brain_pb2 import ExpertOpinion, TIME_HORIZON_SHORT_TERM
+from diting.protocols.brain_pb2 import (
+    ExpertOpinion,
+    TIME_HORIZON_MEDIUM_TERM,
+    TIME_HORIZON_SHORT_TERM,
+)
 
 from diting.moe.alignment import (
     RISK_LEVEL_DISCOUNT,
@@ -53,7 +57,9 @@ def _parse_signals_map(
 def _risk_factors_by_level(
     risk_level: str, from_signals: List[str], domain_defaults: List[str]
 ) -> List[str]:
-    """按风险等级填充风险提示。"""
+    """按风险等级填充风险提示；无风险等级时返回空，不虚构。"""
+    if not risk_level or not str(risk_level).strip():
+        return []
     if risk_level == "高":
         return list(from_signals)[:3] if from_signals else domain_defaults[:2]
     if risk_level == "中":
@@ -93,12 +99,14 @@ def unified_opinion(
     segment_signals_raw: Dict[str, Any],
     config: Dict[str, Any],
     domain_tag: str = "农业",
+    horizon: Optional[int] = None,
 ) -> ExpertOpinion:
     """
     统一分析入口：按设计文档管道步骤输出一条 ExpertOpinion。
     domain_tag 仅用于选用 risk_factor_templates 与 domain 枚举，不改变计算逻辑。
     """
     config = config or {}
+    horizon = horizon if horizon is not None else TIME_HORIZON_SHORT_TERM
     routing = config.get("moe_router") or config
     # 与 B 侧写入 quant_signal_snapshot 一致：确认档或预警档即视为左脑量化门可用（非仅 confirmed）
     if routing.get("require_quant_passed") and quant_signal:
@@ -116,6 +124,7 @@ def unified_opinion(
                 0.0,
                 "量化侧未进入确认档或预警档（require_quant_passed=true）；右脑不予支持",
                 ["量化门控"],
+                horizon=horizon,
             )
     align_cfg = routing.get("alignment", {})
     multi_cfg = routing.get("multi_segment", {})
@@ -149,12 +158,14 @@ def unified_opinion(
         primary_veto=multi_cfg.get("primary_veto", True),
         risk_discount=multi_cfg.get("risk_discount", 0.5),
     )
+    primary_veto_reason = "; ".join(reasoning_parts).strip() if primary_veto and reasoning_parts else None
     reject, reject_reason = should_reject_by_cognitive_boundary(
         segment_list,
         segment_signals,
         alignment_score,
         primary_veto,
         veto_threshold=align_cfg.get("veto_threshold", 0.3),
+        primary_veto_reason=primary_veto_reason,
     )
     if reject:
         reason = build_structured_summary(
@@ -168,10 +179,20 @@ def unified_opinion(
             0.0,
             reason,
             _risk_factors_by_level(risk_level, [], domain_defaults),
+            horizon=horizon,
         )
     # ④ 多细分加权与结构化维度 ⑤ 风险等级降权 ⑥ 拼结构化摘要
-    discount = RISK_LEVEL_DISCOUNT.get(risk_level, 0.9)
+    discount = RISK_LEVEL_DISCOUNT.get(risk_level, 1.0)
     final_conf = weighted_conf * discount
+    blend_cfg = (routing.get("short_confidence_blend") or {}) if isinstance(routing, dict) else {}
+    if blend_cfg.get("enabled") and isinstance(quant_signal, dict):
+        w = float(blend_cfg.get("weight", 0.25))
+        w = max(0.0, min(1.0, w))
+        pct = quant_signal.get("technical_score_percentile")
+        if pct is not None and isinstance(pct, (int, float)):
+            p = max(0.0, min(1.0, float(pct)))
+            final_conf = (1.0 - w) * final_conf + w * p
+            final_conf = max(0.0, min(1.0, final_conf))
     direction = SIGNAL_BULLISH if final_conf >= 0.5 else SIGNAL_NEUTRAL
     from_sigs = []
     for sig in segment_signals.values():
@@ -180,8 +201,10 @@ def unified_opinion(
     summary = build_structured_summary(alignment_score, boom_strength, risk_level, bull_strength)
     if reasoning_parts:
         summary += "；" + "; ".join(reasoning_parts)
+    h = horizon if horizon is not None else TIME_HORIZON_SHORT_TERM
     return _build_opinion(
-        symbol, domain_enum, True, direction, final_conf, summary, risk_factors[:3]
+        symbol, domain_enum, True, direction, final_conf, summary, risk_factors[:3],
+        horizon=h,
     )
 
 

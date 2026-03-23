@@ -77,7 +77,27 @@ def main():
             return
         print("  最近批次:")
         for bid, cnt, created in batches:
-            print("    batch_id=%s 行数=%s 最新=%s" % (bid[:40] + ("..." if len(bid) > 40 else ""), cnt, created))
+            stub_h = ""
+            try:
+                cur.execute(
+                    "SELECT moe_run_metadata FROM moe_expert_opinion_snapshot WHERE batch_id = %s LIMIT 1",
+                    (bid,),
+                )
+                mr = cur.fetchone()
+                if mr and mr[0]:
+                    meta = mr[0] if isinstance(mr[0], dict) else {}
+                    if not isinstance(meta, dict):
+                        meta = json.loads(meta) if meta else {}
+                    if meta.get("stub_segment_signals"):
+                        stub_h = " stub=联调"
+                    elif "stub_segment_signals" in meta:
+                        stub_h = " stub=关"
+            except Exception:
+                pass
+            print(
+                "    batch_id=%s 行数=%s 最新=%s%s"
+                % (bid[:40] + ("..." if len(bid) > 40 else ""), cnt, created, stub_h)
+            )
         cur.execute(
             """
             SELECT symbol, opinions_json, batch_id, created_at

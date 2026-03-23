@@ -52,6 +52,41 @@ def domain_tags_zh_from_tags_json(tags_json: Any) -> List[str]:
     return names if names else ["未知"]
 
 
+def domain_bucket_and_vertical_from_tags_json(
+    tags_json: Any, tag_to_router: Optional[Dict[str, str]] = None
+) -> tuple:
+    """
+    从 tags_json 解析大类（农业/科技/宏观）与垂直细分列表（Top2-3）。
+    :return: (bucket: str, vertical: List[str])
+    """
+    arr = _parse_jsonb(tags_json)
+    tag_to_router = tag_to_router or {}
+    bucket = "未知"
+    vertical: List[str] = []
+    if not isinstance(arr, list) or not arr:
+        return bucket, vertical
+    for t in arr:
+        if not isinstance(t, dict):
+            continue
+        dt = int(t.get("domain_tag", 0))
+        label = (t.get("domain_label") or "").strip()
+        if dt == DomainTag.DOMAIN_CUSTOM and label:
+            vertical.append(label[:64])
+            if not bucket or bucket == "未知":
+                bucket = tag_to_router.get(label, "宏观")
+        elif dt == DomainTag.AGRI:
+            bucket = "农业"
+        elif dt == DomainTag.TECH:
+            bucket = "科技"
+        elif dt == DomainTag.GEO:
+            bucket = "宏观"
+        elif dt == DomainTag.UNKNOWN and (not bucket or bucket == "未知"):
+            bucket = "未知"
+    if not vertical and (not bucket or bucket == "未知"):
+        bucket = "未知"
+    return bucket, vertical[:3]
+
+
 def segment_list_from_segment_shares_json(segment_shares_json: Any) -> List[Dict[str, Any]]:
     """将快照列 segment_shares_json 转为 MoE 用的 segment_list。"""
     arr = _parse_jsonb(segment_shares_json)

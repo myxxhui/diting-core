@@ -75,7 +75,7 @@ def test_alignment_empty_segment_list():
     score, veto, conf, risk, parts, bull, boom, rlevel = out
     assert score == 0.0
     assert veto is True
-    assert "无主营构成" in " ".join(parts)
+    assert "主营构成" in " ".join(parts) or "上游无数据" in " ".join(parts)
 
 
 def test_alignment_primary_no_signal_veto():
@@ -121,7 +121,7 @@ def test_build_structured_summary():
 def test_cognitive_boundary_no_segment_list():
     reject, reason = should_reject_by_cognitive_boundary([], {}, 0.0, False, 0.3)
     assert reject is True
-    assert "无主营构成" in reason
+    assert "上游无数据" in reason or "主营构成" in reason
 
 
 # ----- experts（统一分析入口）-----
@@ -131,7 +131,7 @@ def test_unified_opinion_no_segment_list_is_supported_false():
     op = unified_opinion("000998.SZ", {}, [], {}, {}, domain_tag="农业")
     assert op.is_supported is False
     assert op.domain == 1
-    assert "无主营构成" in op.reasoning_summary or "细分" in op.reasoning_summary
+    assert "上游无数据" in op.reasoning_summary or "主营构成" in op.reasoning_summary or "细分" in op.reasoning_summary
 
 
 def test_unified_opinion_primary_bullish_is_supported_true():
@@ -348,3 +348,27 @@ def test_risk_level_high_discounts_confidence():
     assert "风险等级=高" in op.reasoning_summary
     assert op.confidence <= 0.5
     assert op.confidence >= 0.4
+
+
+def test_unified_opinion_short_confidence_blend_with_percentile():
+    """config short_confidence_blend 开启且 quant_signal 含 technical_score_percentile 时弱耦合 B 截面分位。"""
+    seg_list = [{"segment_id": "agri_pork", "revenue_share": 0.9, "is_primary": True}]
+    signals = {"agri_pork": {"direction": "bullish", "strength": 0.85, "risk_tags": []}}
+    base = {
+        "moe_router": {
+            "short_confidence_blend": {"enabled": True, "weight": 0.5},
+            "alignment": {"primary_weight": 0.6, "other_weight": 0.4, "veto_threshold": 0.3},
+            "multi_segment": {"primary_veto": True, "risk_discount": 0.5},
+            "signal_parse": {},
+        }
+    }
+    op_base = unified_opinion("000998.SZ", {}, seg_list, signals, base, domain_tag="农业")
+    op_hi = unified_opinion(
+        "000998.SZ",
+        {"technical_score_percentile": 0.99},
+        seg_list,
+        signals,
+        base,
+        domain_tag="农业",
+    )
+    assert op_hi.confidence > op_base.confidence

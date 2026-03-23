@@ -12,6 +12,8 @@
 # 终端：精简摘要 + 明细默认全量（与 B 一致：先确认档再预警档，同档 technical_score 降序）；限制行数设 MOE_C_PRINT_ALL=0 与 MOE_C_PRINT_MAX。
 # 生产约定：Module C 只处理「确认档 ∪ 预警档」标的（MOE_C_SCOPE=snapshot，默认），与 B 写入 quant_signal_snapshot 一致。
 # MOE_C_SCOPE=passed 仅确认档（不含仅预警）；=all 全 universe，仅建议本地调试。
+# 细分占位：默认 0（生产，使用真实 segment_signal_cache）；MOE_STUB_SEGMENT_SIGNALS=1 仅供联调，不得作为生产依据。
+# L2 写入 moe_run_metadata（stub、批次、A/B 行数告警等）见 04_A轨_MoE议会_实践「生产级运行与 L2 元数据」。
 # 环境摘要见 .env.template「Module C」节。
 
 import os
@@ -258,6 +260,73 @@ def _scan_b_tier_counts(sym_to_quant: Dict[str, Any]) -> Tuple[int, int, int]:
     return n_conf, n_alert_only, n_snap
 
 
+def _ab_alignment_warnings(
+    use_l2_or_a_snap: bool,
+    n_a_rows: int,
+    n_b_rows: int,
+    a_rows: Dict[str, Any],
+    sym_to_quant: Dict[str, Any],
+    universe: List[str],
+) -> List[str]:
+    """A/B L2 行数或 universe 内 symbol 交集不一致时的可读告警（不阻断运行）。"""
+    out: List[str] = []
+    if use_l2_or_a_snap and n_a_rows != n_b_rows:
+        out.append(
+            "L2 classifier 行数(%s) ≠ quant_scan_all(%s)：请核对 MOE_CLASSIFIER_BATCH_ID / MOE_QUANT_BATCH_ID 是否与 A、B 同一业务跑批一致，或重跑 make run-module-a / make run-module-b"
+            % (n_a_rows, n_b_rows)
+        )
+    if use_l2_or_a_snap and a_rows and sym_to_quant and universe:
+        u_set = {str(s).strip().upper() for s in universe if s and str(s).strip()}
+        ak = set(a_rows.keys()) & u_set
+        bk = set(sym_to_quant.keys()) & u_set
+        only_a = len(ak - bk)
+        only_b = len(bk - ak)
+        if only_a or only_b:
+            out.append(
+                "universe 内 A 快照与 B 量化 symbol 不一致：仅 A 有 %s 只、仅 B 有 %s 只（批次或名单漂移）"
+                % (only_a, only_b)
+            )
+    return out
+
+
+def _moe_run_metadata_dict(
+    *,
+    stub: bool,
+    enable_vc: bool,
+    require_quant_passed: bool,
+    pipeline: str,
+    scope_mode: str,
+    seg_src: str,
+    snapshot_batch_hint: Optional[str],
+    quant_batch_hint: Optional[str],
+    write_batch_id: str,
+    n_a_rows: int,
+    n_b_rows: int,
+    n_sym: int,
+    n_universe: int,
+    ab_warnings: List[str],
+    track: str = "a",
+) -> Dict[str, Any]:
+    """写入 L2 moe_run_metadata，供判官/审计区分联调与生产、追溯批次。"""
+    return {
+        "track": track,
+        "stub_segment_signals": stub,
+        "vc_agent_enabled": enable_vc,
+        "require_quant_passed": require_quant_passed,
+        "pipeline": pipeline,
+        "scope": scope_mode,
+        "moe_segment_source": seg_src,
+        "classifier_batch_id": snapshot_batch_hint or "",
+        "quant_batch_id": quant_batch_hint or "",
+        "output_batch_id": write_batch_id or "",
+        "l2_classifier_row_count": n_a_rows,
+        "l2_quant_scan_all_row_count": n_b_rows,
+        "processed_symbols": n_sym,
+        "universe_symbols": n_universe,
+        "alignment_warnings": ab_warnings,
+    }
+
+
 def _moe_detail_sort_key(q: Dict[str, Any], sym: str) -> Tuple[int, float, str]:
     """明细排序：先确认档再预警档，同档按 technical_score 降序（对齐 B 模块风控表）。"""
     c = bool(q.get("confirmed_passed"))
@@ -271,22 +340,55 @@ def _moe_detail_sort_key(q: Dict[str, Any], sym: str) -> Tuple[int, float, str]:
     return (tier, -float(q.get("technical_score") or 0), sym)
 
 
+def _short_unsupported_reason(
+    router_domain: Optional[str], reasoning: str
+) -> str:
+    """依实际情况输出短轨不予支持的原因，路由失败单独处理。"""
+    if router_domain is None:
+        return "路由失败，不予支持"
+    r = (reasoning or "").strip()
+    if "无法归类或未映射" in r:
+        return "路由失败，不予支持"
+    if "主营构成为空" in r or "标的主营构成" in r:
+        return "主营为空，不予支持"
+    if "主营细分无信号" in r:
+        return "主营无信号，不予支持"
+    if "主营细分利空" in r:
+        return "主营利空，不予支持"
+    if "全部细分无垂直信号" in r:
+        return "无细分信号，不予支持"
+    if "利好与主营未对齐" in r or "未对齐" in r:
+        return "主营未对齐，不予支持"
+    if "量化" in r and ("门控" in r or "未进入" in r):
+        return "量化未过，不予支持"
+    # 截取首句或前 20 字 + 不予支持
+    head = r.split("；")[0].split("。")[0].strip()
+    if len(head) > 18:
+        head = head[:16] + "…"
+    return ("%s，不予支持" % head) if head else "不予支持"
+
+
 def _moe_detail_cells(
     sym: str,
-    domain_tags: List[str],
-    router_domain: Optional[str],
+    bucket: str,
+    vertical: List[str],
+    router_display: str,
     quant_signal: Dict[str, Any],
     opinions: List[Any],
     enable_vc: bool,
     stub: bool,
+    router_domain: Optional[str] = None,
+    vert_share_str: str = "",
+    primary_rev_wan: float = 0.0,
+    secondary_rev_wan: float = 0.0,
 ) -> List[str]:
     from diting.protocols.brain_pb2 import TIME_HORIZON_LONG_TERM
 
     tech = float(quant_signal.get("technical_score") or 0.0)
     lt = bool(quant_signal.get("long_term_candidate"))
     tier = _b_tier_cell(quant_signal)
-    tags = _fmt_tags_short(domain_tags, 28)
-    rd_disp = router_domain or "—"
+    vert_str = _fmt_tags_short(vertical, 28) if vertical else (bucket or "—")
+    rd_disp = router_display or "—"
 
     vc_s = "-"
     if enable_vc and lt:
@@ -304,7 +406,10 @@ def _moe_detail_cells(
     elif getattr(short_op, "is_supported", False):
         short_txt = "%s %.2f" % (_direction_cn(getattr(short_op, "direction", 0)), float(getattr(short_op, "confidence", 0) or 0))
     else:
-        short_txt = "垃圾箱"
+        short_txt = _short_unsupported_reason(
+            router_domain,
+            getattr(short_op, "reasoning_summary", None) or "",
+        )
 
     raw_rs = (getattr(short_op, "reasoning_summary", None) or "").strip() if short_op else ""
     if stub:
@@ -313,29 +418,41 @@ def _moe_detail_cells(
     else:
         rs_in = raw_rs or "-"
 
+    pr_str = "%.0f" % primary_rev_wan if primary_rev_wan else "-"
+    sr_str = "%.0f" % secondary_rev_wan if secondary_rev_wan else "-"
+    vs_str = vert_share_str[:18] if vert_share_str else "-"
     return [
         sym[:12],
         tier,
-        tags,
+        bucket[:8] if bucket else "—",
+        vert_str,
+        vs_str,
+        pr_str,
+        sr_str,
         rd_disp,
         "%.2f" % tech,
         "是" if lt else "否",
         vc_s,
-        short_txt[:12],
+        _truncate_display(short_txt, 16),
         rs_in,
     ]
 
 
 def _moe_detail_layout(reason_w: int) -> Tuple[List[int], List[str], List[str]]:
-    """表头与列宽（用户可见列名用中文简写）。"""
-    widths = [12, 6, 28, 6, 7, 4, 6, 12, reason_w]
-    aligns = ["left", "center", "left", "center", "right", "center", "center", "left", "left"]
-    headers = ["标的", "B档", "A标签", "路由", "技分", "长候", "长轨", "短轨", "摘要"]
+    """表头与列宽：大类/垂直分列，垂直占比、主营/次营营收，路由=垂直细分。"""
+    widths = [12, 6, 8, 22, 18, 10, 10, 8, 7, 4, 6, 16, reason_w]
+    aligns = ["left", "center", "center", "left", "left", "right", "right", "center", "right", "center", "center", "left", "left"]
+    headers = ["标的", "B档", "大类", "垂直", "垂直占比%", "主营(万)", "次营(万)", "路由", "技分", "长候", "长轨", "短轨", "摘要"]
     return widths, aligns, headers
 
 
 def main() -> int:
+    from diting.classifier.business_segment_provider import (
+        get_latest_revenue_batch,
+        get_segment_labels_and_shares_batch,
+    )
     from diting.classifier.snapshot_reader import (
+        domain_bucket_and_vertical_from_tags_json,
         domain_tags_zh_from_tags_json,
         fetch_latest_classifier_batch_id,
         fetch_snapshot_rows_batch,
@@ -353,7 +470,31 @@ def main() -> int:
     from diting.scanner.quant import QuantScanner
     from diting.universe import parse_symbol_list_from_env
 
-    universe = parse_symbol_list_from_env("DITING_SYMBOLS") or parse_symbol_list_from_env("MODULE_AB_SYMBOLS")
+    pg_l2 = (os.environ.get("PG_L2_DSN") or "").strip()
+    track = (os.environ.get("DITING_TRACK") or "a").strip().lower()
+    universe: List[str] = []
+    if track == "b" and pg_l2:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(pg_l2)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT symbol FROM b_track_candidate_snapshot
+                WHERE batch_id = (SELECT batch_id FROM b_track_candidate_snapshot ORDER BY created_at DESC LIMIT 1)
+                ORDER BY symbol
+                """
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            universe = [str(r[0] or "").strip() for r in rows if r and (r[0] or "").strip()]
+            if universe:
+                print("DITING_TRACK=b: 从 b_track_candidate_snapshot 取 %d 只标的" % len(universe))
+        except Exception as e:
+            print("[提示] DITING_TRACK=b 但 b_track_candidate_snapshot 读取失败: %s；回退 A 轨" % e, file=sys.stderr)
+    if not universe:
+        universe = parse_symbol_list_from_env("DITING_SYMBOLS") or parse_symbol_list_from_env("MODULE_AB_SYMBOLS")
     if not universe:
         from diting.classifier.run import _default_universe_from_diting_symbols
 
@@ -361,8 +502,6 @@ def main() -> int:
     if not universe:
         print("错误: 未获取到标的列表", file=sys.stderr)
         return 1
-
-    pg_l2 = (os.environ.get("PG_L2_DSN") or "").strip()
     env_pipeline = (os.environ.get("MOE_PIPELINE") or "").strip()
     if env_pipeline:
         pipeline = env_pipeline.lower()
@@ -381,14 +520,36 @@ def main() -> int:
 
     clf_results: List[Any] = []
     sym_to_quant: Dict[str, Any] = {}
+    a_rows: Dict[str, Any] = {}
+    _mcfg = _load_moe_config()
+    _mr = _mcfg.get("moe_router") or _mcfg
+    tag_to_router = (_mr.get("tag_to_router_domain") or {}) if isinstance(_mr, dict) else {}
 
     class _Snap:
-        __slots__ = ("symbol", "domain_tags", "segment_list")
+        __slots__ = (
+            "symbol", "domain_tags", "segment_list", "bucket", "vertical",
+            "vert_share_str", "primary_rev_wan", "secondary_rev_wan",
+        )
 
-        def __init__(self, symbol: str, domain_tags: List[str], segment_list: List[Dict[str, Any]]):
+        def __init__(
+            self,
+            symbol: str,
+            domain_tags: List[str],
+            segment_list: List[Dict[str, Any]],
+            bucket: str = "未知",
+            vertical: Optional[List[str]] = None,
+            vert_share_str: str = "",
+            primary_rev_wan: float = 0.0,
+            secondary_rev_wan: float = 0.0,
+        ):
             self.symbol = symbol
             self.domain_tags = domain_tags
             self.segment_list = segment_list
+            self.bucket = bucket or "未知"
+            self.vertical = vertical or []
+            self.vert_share_str = vert_share_str or ""
+            self.primary_rev_wan = primary_rev_wan or 0.0
+            self.secondary_rev_wan = secondary_rev_wan or 0.0
 
     if use_l2_only:
         if not pg_l2:
@@ -416,10 +577,12 @@ def main() -> int:
             if r:
                 dt = domain_tags_zh_from_tags_json(r.get("tags_json"))
                 sl = segment_list_from_segment_shares_json(r.get("segment_shares_json"))
+                bucket, vert = domain_bucket_and_vertical_from_tags_json(r.get("tags_json"), tag_to_router)
             else:
                 dt = ["未知"]
                 sl = []
-            clf_results.append(_Snap(sym, dt, sl))
+                bucket, vert = "未知", []
+            clf_results.append(_Snap(sym, dt, sl, bucket, vert))
     else:
         if use_a_snapshot:
             if not pg_l2:
@@ -429,6 +592,7 @@ def main() -> int:
             if not snapshot_batch_hint:
                 snapshot_batch_hint = fetch_latest_classifier_batch_id(pg_l2)
             rows = fetch_snapshot_rows_batch(pg_l2, universe, batch_id=snapshot_batch_hint)
+            a_rows = rows
             n_a_rows = len(rows)
             if rows:
                 any_b = next(iter(rows.values())).get("batch_id") or ""
@@ -440,10 +604,12 @@ def main() -> int:
                 if r:
                     dt = domain_tags_zh_from_tags_json(r.get("tags_json"))
                     sl = segment_list_from_segment_shares_json(r.get("segment_shares_json"))
+                    bucket, vert = domain_bucket_and_vertical_from_tags_json(r.get("tags_json"), tag_to_router)
                 else:
                     dt = ["未知"]
                     sl = []
-                clf_results.append(_Snap(sym, dt, sl))
+                    bucket, vert = "未知", []
+                clf_results.append(_Snap(sym, dt, sl, bucket, vert))
         else:
             from diting.classifier import SemanticClassifier
             from diting.classifier.semantic import load_rules
@@ -516,12 +682,40 @@ def main() -> int:
             sym_to_quant = {str(x.get("symbol", "")).strip().upper(): x for x in scan_out}
             n_b_rows = len(sym_to_quant)
 
-    # 未设置时默认开：占位策略生效；显式 0/false 为关（忽略占位，走真实细分，须已接库）
-    stub = os.environ.get("MOE_STUB_SEGMENT_SIGNALS", "1").strip().lower() in ("1", "true", "yes")
+    seg_extra: Dict[str, Tuple[str, float, float]] = {}
+    if pg_l2 and universe:
+        try:
+            seg_labels = get_segment_labels_and_shares_batch(pg_l2, list(universe), 3)
+            rev_wan = get_latest_revenue_batch(pg_l2, list(universe))
+            for sk in set((s or "").strip().upper() for s in universe if (s or "").strip()):
+                rows_s = seg_labels.get(sk, [])
+                rv = rev_wan.get(sk, 0.0)
+                vs = ",".join("%s%d%%" % ((l or "其他").strip() or "其他", round(sh * 100)) for l, sh in rows_s[:3]) if rows_s else ""
+                pr = rv * rows_s[0][1] if rows_s else 0.0
+                sr = rv * rows_s[1][1] if len(rows_s) > 1 else 0.0
+                seg_extra[sk] = (vs, pr, sr)
+        except Exception:
+            pass
+
+    # 生产默认关占位（走真实细分信号；无信号时认知边界→不支持）。本地联调显式 MOE_STUB_SEGMENT_SIGNALS=1
+    stub = os.environ.get("MOE_STUB_SEGMENT_SIGNALS", "0").strip().lower() in ("1", "true", "yes")
     enable_vc = os.environ.get("MOE_ENABLE_VC_AGENT", "1").strip().lower() not in ("0", "false", "no")
+    _mcfg = _load_moe_config()
+    _mr = _mcfg.get("moe_router") or _mcfg
+    require_qp = bool(_mr.get("require_quant_passed"))
+    ab_warnings = _ab_alignment_warnings(
+        use_l2_only or use_a_snapshot,
+        n_a_rows,
+        n_b_rows,
+        a_rows,
+        sym_to_quant,
+        universe,
+    )
     reason_floor, reason_cap = _moe_reason_floor_and_cap()
 
     scope_mode = _parse_moe_c_scope()
+    if track == "b":
+        scope_mode = "all"
     n_universe = len(clf_results)
     n_in_scope = 0
     for out in clf_results:
@@ -529,6 +723,30 @@ def main() -> int:
         q0 = sym_to_quant.get(sym_u) or {}
         if _quant_in_moe_scope(q0, scope_mode):
             n_in_scope += 1
+
+    # [Ref: 05_C模块_输出检测与问题根治最佳实践] stub=0 时探测 segment_signal_cache 是否为空，非阻断性提示
+    if not stub and pg_l2 and n_in_scope > 0:
+        all_seg_ids = []
+        for out in clf_results:
+            sym_u = str(out.symbol or "").strip().upper()
+            if not _quant_in_moe_scope(sym_to_quant.get(sym_u) or {}, scope_mode):
+                continue
+            sl = getattr(out, "segment_list", None) or []
+            for s in sl:
+                sid = str(s.get("segment_id") or "").strip()
+                if sid:
+                    all_seg_ids.append(sid)
+        all_seg_ids = list(dict.fromkeys(all_seg_ids))
+        if all_seg_ids:
+            try:
+                from diting.moe.segment_signal_reader import fetch_segment_signals_for_segments
+                probe = fetch_segment_signals_for_segments(pg_l2, all_seg_ids[:20])
+                if not probe:
+                    ab_warnings.append(
+                        "segment_signal_cache 无本批 segment 数据；建议先 make refresh-segment-signals。无数据时 C 将输出「主营细分无信号」。"
+                    )
+            except Exception:
+                pass
 
     packed: List[Tuple[Dict[str, Any], str, Any, Optional[str], List[str]]] = []
 
@@ -540,13 +758,25 @@ def main() -> int:
         if use_a_snapshot or use_l2_only:
             domain_tags = getattr(out, "domain_tags", []) or ["未知"]
             segment_list = getattr(out, "segment_list", []) or []
+            bucket = getattr(out, "bucket", None) or "未知"
+            vertical = getattr(out, "vertical", None) or []
         else:
             domain_tags = _domain_tags_zh(out)
             segment_list = _segment_list_from_classifier(out)
+            router_domain_tmp = resolve_router_domain_tag(domain_tags, None)
+            bucket = router_domain_tmp or "未知"
+            vertical = [t for t in domain_tags if t not in ("农业", "科技", "宏观", "未知")][:3]
+
+        router_display = vertical[0] if vertical else (bucket or "—")
 
         segment_signals: Dict[str, Any] = {}
         if stub:
             segment_signals = _stub_segment_signals(segment_list)
+        elif pg_l2 and segment_list:
+            seg_ids = [str(s.get("segment_id") or "").strip() for s in segment_list if s.get("segment_id")]
+            if seg_ids:
+                from diting.moe.segment_signal_reader import fetch_segment_signals_for_segments
+                segment_signals = fetch_segment_signals_for_segments(pg_l2, seg_ids)
 
         router_domain = resolve_router_domain_tag(domain_tags, None)
 
@@ -557,14 +787,23 @@ def main() -> int:
             segment_list=segment_list,
             segment_signals=segment_signals,
             enable_vc_agent=enable_vc,
+            track=track,
         )
+        vs, pr, sr = seg_extra.get(sym, ("", 0.0, 0.0))
         packed.append(
             (
                 quant_signal,
                 sym,
                 opinions,
                 router_domain,
-                _moe_detail_cells(sym, domain_tags, router_domain, quant_signal, opinions, enable_vc, stub),
+                _moe_detail_cells(
+                    sym, bucket, vertical, router_display,
+                    quant_signal, opinions, enable_vc, stub,
+                    router_domain=router_domain,
+                    vert_share_str=vs,
+                    primary_rev_wan=pr,
+                    secondary_rev_wan=sr,
+                ),
             )
         )
 
@@ -577,7 +816,7 @@ def main() -> int:
     n_lt_cand = 0
     n_vc_emitted = 0
     n_short_ok = 0
-    n_short_trash = 0
+    n_short_unsupported = 0
     domain_ok_counter: Counter = Counter()
 
     for quant_signal, _sym, opinions, router_domain, _cells in packed:
@@ -592,11 +831,8 @@ def main() -> int:
                 if router_domain:
                     domain_ok_counter[router_domain] += 1
             else:
-                n_short_trash += 1
+                n_short_unsupported += 1
 
-    _mcfg = _load_moe_config()
-    _mr = _mcfg.get("moe_router") or _mcfg
-    require_qp = bool(_mr.get("require_quant_passed"))
     n_b_conf, n_b_alert_only, n_b_snap = _scan_b_tier_counts(sym_to_quant)
 
     a_src = "L2" if use_a_snapshot else "内存分类"
@@ -605,8 +841,8 @@ def main() -> int:
     print("────────────────────────────────────────────────────────")
     print("  Module C（MoE）")
     print(
-        "    本批 %s 只    universe %s    scope=%s    pipeline=%s"
-        % (n_sym, n_universe, scope_mode, pipeline)
+        "    本批 %s 只    universe %s    scope=%s    pipeline=%s    track=%s"
+        % (n_sym, n_universe, scope_mode, pipeline, track)
     )
     print("    数据源  A:%s    B:%s" % (a_src, b_src))
     if scope_mode == "all":
@@ -634,8 +870,8 @@ def main() -> int:
         print("    [警告] 无 snapshot 标的 → 先 make run-module-b 或 MOE_C_SCOPE=all")
     print()
     print(
-        "    MoE 产出    长候 %s    长轨 %s    短轨 OK %s    未支持 %s"
-        % (n_lt_cand, n_vc_emitted, n_short_ok, n_short_trash)
+        "    MoE 产出    长候 %s    长轨 %s    短轨 OK %s    不予支持 %s"
+        % (n_lt_cand, n_vc_emitted, n_short_ok, n_short_unsupported)
     )
     if domain_ok_counter:
         print(
@@ -656,6 +892,19 @@ def main() -> int:
     else:
         ohlcv_dsn = (os.environ.get("TIMESCALE_DSN") or "").strip() or None
         print("    TIMESCALE_DSN    %s" % ("已配置" if ohlcv_dsn else "未配置（逐标慢）"))
+    if stub:
+        print()
+        print("    ╔═══════════════════════════════════════════════════════════════════════╗")
+        print("    ║ [警告] stub=开：细分信号为占位数据，非真实 segment_signal_cache；     ║")
+        print("    ║        仅供本地联调，不得作为生产右脑依据。生产请 stub=0。           ║")
+        print("    ╚═══════════════════════════════════════════════════════════════════════╝")
+        print()
+    else:
+        print(
+            "    [提示] stub=关：使用真实 segment_signal_cache；无数据时输出「上游无数据」"
+        )
+    for aw in ab_warnings:
+        print("    [警告] %s" % aw)
     print("────────────────────────────────────────────────────────")
 
     env_pa = (os.environ.get("MOE_C_PRINT_ALL") or "").strip().lower()
@@ -695,11 +944,29 @@ def main() -> int:
     write_id = ""
     if pg_l2 and all_rows:
         write_id = (os.environ.get("MOE_OUTPUT_BATCH_ID") or "").strip() or batch_id
+        run_meta = _moe_run_metadata_dict(
+            stub=stub,
+            enable_vc=enable_vc,
+            require_quant_passed=require_qp,
+            pipeline=pipeline,
+            scope_mode=scope_mode,
+            seg_src=seg_src,
+            snapshot_batch_hint=snapshot_batch_hint,
+            quant_batch_hint=quant_batch_hint,
+            write_batch_id=write_id,
+            n_a_rows=n_a_rows,
+            n_b_rows=n_b_rows,
+            n_sym=n_sym,
+            n_universe=n_universe,
+            ab_warnings=ab_warnings,
+            track=track,
+        )
         n_written = write_moe_expert_opinion_snapshot(
             pg_l2,
             all_rows,
             batch_id=write_id,
             correlation_id=write_id,
+            run_metadata=run_meta,
         )
         print("======== 写入 L2（moe_expert_opinion_snapshot）========  ")
         if n_written > 0:
@@ -712,10 +979,10 @@ def main() -> int:
     print()
     expect_ok = bool(pg_l2 and (n_sym == 0 or (n_written > 0 and n_written == n_sym)))
     print("======== 准出 ======")
-    print(
-        "  处理=%s 只 | 短轨 OK=%s | L2 写入=%s | %s"
-        % (n_sym, n_short_ok, n_written, "符合预期" if expect_ok else "异常（查 PG_L2_DSN、表、MOE_C_SCOPE、L2 返回）")
-    )
+    exit_note = "符合预期" if expect_ok else "异常（查 PG_L2_DSN、表、MOE_C_SCOPE、L2 返回）"
+    if expect_ok and stub:
+        exit_note = "符合预期（stub 联调；生产请关 stub）"
+    print("  处理=%s 只 | 短轨 OK=%s | L2 写入=%s | %s" % (n_sym, n_short_ok, n_written, exit_note))
     print()
     return 0
 

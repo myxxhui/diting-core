@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production query-ingest-overview check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast fetch-sector-symbols deps-ingest ingest-business-profile build-images build-module-a deps-classifier deps-scanner deps-scanner-alphalens diting prod run-module-a query-module-a-output init-l2-classifier-table init-l2-industry-revenue-table init-l2-business-profile-tables init-l2-b-module-tables run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table prune-l2-quant-scan-all factor-quality-smoke init-l2-symbol-names-table sync-symbol-names-csv test-scanner golden-scanner-batch run-module-c query-module-c-output verify-module-c init-l2-moe-opinion-table test-moe deps-moe
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production query-ingest-overview check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real sync-prod-conn ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast fetch-sector-symbols deps-ingest ingest-business-profile build-images build-module-a deps-classifier deps-scanner deps-scanner-alphalens diting prod run-module-a query-module-a-output init-l2-classifier-table init-l2-industry-revenue-table init-l2-business-profile-tables init-l2-segment-signal-cache refresh-segment-signals init-l2-b-module-tables run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table prune-l2-quant-scan-all factor-quality-smoke init-l2-symbol-names-table sync-symbol-names-csv test-scanner golden-scanner-batch run-module-c query-module-c-output verify-module-c init-l2-moe-opinion-table test-moe deps-moe
 
 # 采集相关 target 使用的 Python：akshare 推荐 >= 3.9。Make 解析时用非交互 shell，需先加载 pyenv 才能找到 pyenv 安装的 3.9
 PYTHON_INGEST := $(shell export PYENV_ROOT="$$HOME/.pyenv" && [ -d "$$PYENV_ROOT/bin" ] && export PATH="$$PYENV_ROOT/bin:$$PATH" && eval "$$(pyenv init - 2>/dev/null)" 2>/dev/null; command -v python3.11 2>/dev/null || command -v python3.10 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3.8 2>/dev/null || command -v python3 2>/dev/null)
@@ -114,12 +114,10 @@ ingest-deploy:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_deploy.py
 
-# Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线。默认串行+标间延迟（CONCURRENT=1、DELAY=3s）减轻东方财富断连；仍断连可设 INGEST_OHLCV_SOURCE=baostock 或加大 INGEST_OHLCV_DELAY_BETWEEN_SYMBOLS。
-# 执行前仅同步「连接相关」变量（TIMESCALE_DSN、PG_L2_DSN、REDIS_URL、KUBECONFIG、PUBLIC_IP）从 prod.conn 到 .env，不覆盖其它配置。
-# 可通过 PROD_CONN_FILE 指定 prod.conn 路径，未设则使用 ../diting-infra/prod.conn（相对本仓根目录）。
-# 不在此处 export 默认值，由脚本加载 .env；未设置的变量才用脚本内默认参数。
+# 将 diting-infra/prod.conn 中「连接相关」变量合并到本仓 .env（TIMESCALE_DSN、PG_L2_DSN、REDIS_URL、KUBECONFIG、PUBLIC_IP），不覆盖其它行。
+# 可被单独执行：make sync-prod-conn；也可设 PROD_CONN_FILE=路径 覆盖默认 ../diting-infra/prod.conn。
 CONN_KEYS_PATTERN = ^(TIMESCALE_DSN|PG_L2_DSN|REDIS_URL|KUBECONFIG|PUBLIC_IP)=
-ingest-production:
+sync-prod-conn:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	conn_file="$(PROD_CONN_FILE)"; [ -z "$$conn_file" ] && conn_file="$$root/../diting-infra/prod.conn"; \
 	if [ -f "$$conn_file" ]; then \
@@ -138,7 +136,13 @@ ingest-production:
 				echo "已用 prod.conn 仅同步连接相关变量到 .env（其它配置未改动）"; \
 			fi; \
 		fi; \
-	fi; \
+	fi
+
+# Stage2-06 全量生产级数据采集：先刷新全A股 universe，再按 universe 拉取单标≥5 年日线。默认串行+标间延迟（CONCURRENT=1、DELAY=3s）减轻东方财富断连；仍断连可设 INGEST_OHLCV_SOURCE=baostock 或加大 INGEST_OHLCV_DELAY_BETWEEN_SYMBOLS。
+# 执行前依赖 sync-prod-conn（与 run-module-a/b/c 等同）。
+# 不在此处 export 默认值，由脚本加载 .env；未设置的变量才用脚本内默认参数。
+ingest-production: sync-prod-conn
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_production.py
 
 # 同上，但后台运行：nohup 将输出写入 INGEST_PROD_LOG（默认 ingest-production.log），关终端不杀进程；查看进度: tail -f $(INGEST_PROD_LOG)
@@ -204,7 +208,7 @@ build-module-b:
 	@echo "build-module-b: diting-module-b:latest OK ($(DOCKER_PLATFORM))"
 
 # Stage3-01 一键本地运行 A 模块：加载 .env，执行分类，输出执行标的、执行结果、写入位置 [Ref: 01_语义分类器_实践]
-run-module-a:
+run-module-a: sync-prod-conn
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	_saved_ds="$$DITING_SYMBOLS"; _saved_mab="$$MODULE_AB_SYMBOLS"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
@@ -213,7 +217,7 @@ run-module-a:
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/run_module_a_local.py
 
 # Stage3-01 一键查询 A 模块写入的数据：L2 表 classifier_output_snapshot（需 PG_L2_DSN 可达）[Ref: 01_语义分类器_实践]
-query-module-a-output:
+query-module-a-output: sync-prod-conn
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/query_classifier_output.py
@@ -247,12 +251,30 @@ ingest-business-profile:
 	cd "$$root" && PYTHONPATH="$$root" $(PYTHON_INGEST) scripts/run_ingest_business_profile_batch.py
 
 # B 模块常用 L2 表：分类器快照、量化快照、行业汇总、主营构成（按需执行，首次连库或报 relation does not exist 时）
-init-l2-b-module-tables: init-l2-classifier-table init-l2-quant-signal-table init-l2-industry-revenue-table init-l2-business-profile-tables
-	@echo "init-l2-b-module-tables OK（classifier_output_snapshot / quant_signal_* / industry_revenue_summary / segment_registry+symbol_business_profile）"
+# b_track_candidate_snapshot：B 轨候选；DITING_TRACK=b 时 C 与 refresh 从此表取 symbols
+init-l2-b-track-candidate:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_b_track_candidate_snapshot.py
+
+# segment_signal_cache：Module C 细分信号来源，信号层写入；表可先建空供 C 查询
+init-l2-segment-signal-cache:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_segment_signal_cache.py
+
+# Stage2-06 信号层 refresh：按本批 symbols 拉取生产级细分信号 → 写 segment_signal_cache；B 写表后、C 前执行
+refresh-segment-signals: sync-prod-conn
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/run_refresh_segment_signals.py
+
+init-l2-b-module-tables: init-l2-classifier-table init-l2-quant-signal-table init-l2-industry-revenue-table init-l2-business-profile-tables init-l2-segment-signal-cache
+	@echo "init-l2-b-module-tables OK（classifier_output_snapshot / quant_signal_* / industry_revenue_summary / segment_registry+symbol_business_profile / segment_signal_cache）"
 
 # Stage3-02 一键本地运行 B 模块：基于 A 同源标的执行扫描，结果写入 L2 quant_signal_snapshot 供 Module C 使用 [Ref: 02_量化扫描引擎_实践]（需先 make deps-scanner；L2 缺表时 make init-l2-b-module-tables）
 # macOS：Homebrew 安装的 ta-lib 为 libta-lib.dylib，Python 包需 libta_lib；若存在 .ta_lib_link 则加入 DYLD_LIBRARY_PATH
-run-module-b:
+run-module-b: sync-prod-conn
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	[ -d "$$root/.ta_lib_link" ] && export DYLD_LIBRARY_PATH="$$root/.ta_lib_link:/opt/homebrew/opt/ta-lib/lib:$${DYLD_LIBRARY_PATH:-}"; true; \
@@ -261,7 +283,7 @@ run-module-b:
 
 # Stage3-02 一键查询 B 模块写入的数据：L2 表 quant_signal_snapshot（需 PG_L2_DSN 可达）[Ref: 02_量化扫描引擎_实践]
 # 可选位置参数：make query-module-b-output 3-22（日历日，与 QUERY_SCANNER_DATE 等价）；QUERY_SCANNER_BATCH_INDEX=1 取当日倒数第二批
-query-module-b-output:
+query-module-b-output: sync-prod-conn
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
@@ -329,16 +351,22 @@ init-l2-moe-opinion-table:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_moe_expert_opinion_table.py
 
-# Stage3-04 一键运行 C（唯一入口）。已配 PG_L2_DSN 且未设 MOE_PIPELINE 时默认从 L2 读 A+B；本机当场重算 B 请 export MOE_PIPELINE=full（须 TIMESCALE_DSN、deps-scanner）
-run-module-c:
+# Stage3-04 一键运行 C（唯一入口）。默认 stub=0（生产）；已配 PG_L2_DSN 且未设 MOE_PIPELINE 时默认从 L2 读 A+B
+run-module-c: sync-prod-conn
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	[ -d "$$root/.ta_lib_link" ] && export DYLD_LIBRARY_PATH="$$root/.ta_lib_link:/opt/homebrew/opt/ta-lib/lib:$${DYLD_LIBRARY_PATH:-}"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/run_module_c_local.py
+# 联调模式：stub=1 占位细分信号，仅用于管道验证，不作生产依据
+run-module-c-dev:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -d "$$root/.ta_lib_link" ] && export DYLD_LIBRARY_PATH="$$root/.ta_lib_link:/opt/homebrew/opt/ta-lib/lib:$${DYLD_LIBRARY_PATH:-}"; true; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
 	cd "$$root" && MOE_STUB_SEGMENT_SIGNALS=1 PYTHONPATH="$$root" $$py scripts/run_module_c_local.py
 
 # Stage3-04 一键查询 C 写入：L2 moe_expert_opinion_snapshot
-query-module-c-output:
+query-module-c-output: sync-prod-conn
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/query_module_c_output.py

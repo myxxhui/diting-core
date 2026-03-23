@@ -479,6 +479,9 @@ class QuantScanner:
             }
             if emit_regime:
                 item["market_regime"] = dict(market_regime_row)
+            if self._product.get("emit_win_rate_payoff", False):
+                item["win_rate_prediction"] = float(self._product.get("win_rate_prediction", 0.7))
+                item["payoff_ratio"] = float(self._product.get("payoff_ratio", 2.0))
             item["scanner_rules_fingerprint"] = self._scanner_rules_fingerprint
             item["evaluation_source"] = "FRESH"
             item["industry_mapped"] = industry_mapped

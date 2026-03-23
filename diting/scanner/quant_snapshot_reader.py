@@ -84,6 +84,7 @@ def fetch_quant_signal_scan_all_map(
                     """
                     SELECT DISTINCT ON (symbol) symbol, technical_score, strategy_source, sector_strength,
                            trend_score, reversion_score, breakout_score, momentum_score,
+                           technical_score_percentile,
                            long_term_score, long_term_candidate, passed,
                            alert_passed, confirmed_passed, correlation_id, batch_id
                     FROM quant_signal_scan_all
@@ -97,6 +98,7 @@ def fetch_quant_signal_scan_all_map(
                     """
                     SELECT DISTINCT ON (symbol) symbol, technical_score, strategy_source, sector_strength,
                            trend_score, reversion_score, breakout_score, momentum_score,
+                           technical_score_percentile,
                            long_term_score, long_term_candidate, passed,
                            alert_passed, confirmed_passed, correlation_id, batch_id
                     FROM quant_signal_scan_all
@@ -111,24 +113,26 @@ def fetch_quant_signal_scan_all_map(
                 rev = float(row[5] or 0)
                 brk = float(row[6] or 0)
                 mom = float(row[7] or 0)
-                lt = row[8]
-                lt_cand = bool(row[9])
-                passed = bool(row[10])
-                alert_p = bool(row[11])
-                conf_p = bool(row[12])
+                pct = row[8]
+                lt = row[9]
+                lt_cand = bool(row[10])
+                passed = bool(row[11])
+                alert_p = bool(row[12])
+                conf_p = bool(row[13])
                 out[sym] = {
                     "symbol": sym,
                     "technical_score": float(row[1] or 0),
                     "strategy_source": str(row[2] or "UNSPECIFIED"),
                     "sector_strength": float(row[3] or 0),
                     "pool_scores": {1: trend, 2: rev, 3: brk, 4: mom},
+                    "technical_score_percentile": float(pct) if pct is not None else None,
                     "long_term_score": float(lt) if lt is not None else None,
                     "long_term_candidate": lt_cand,
                     "passed": passed,
                     "alert_passed": alert_p,
                     "confirmed_passed": conf_p,
-                    "correlation_id": str(row[13] or ""),
-                    "quant_batch_id": str(row[14] or ""),
+                    "correlation_id": str(row[14] or ""),
+                    "quant_batch_id": str(row[15] or ""),
                 }
             cur.close()
         finally:

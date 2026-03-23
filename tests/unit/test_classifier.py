@@ -171,11 +171,15 @@ def test_classify_batch_returns_list_and_logs_universe_size():
 
 
 def test_refine_power_label_from_disclosure():
-    assert refine_power_label_from_disclosure("水力发电") == "水电"
-    assert refine_power_label_from_disclosure("燃煤发电") == "火电"
-    assert refine_power_label_from_disclosure("风力发电") == "风电"
+    assert refine_power_label_from_disclosure("水力发电") == "水力发电"
+    assert refine_power_label_from_disclosure("燃煤发电") == "火力发电"
+    assert refine_power_label_from_disclosure("风力发电") == "风力发电"
     assert refine_power_label_from_disclosure("光伏发电") == "新能源发电"
-    assert refine_power_label_from_disclosure("售电业务") == "售电"
+    assert refine_power_label_from_disclosure("售电业务") == "售电业务"
+    assert refine_power_label_from_disclosure("电力") == "发电与供电业务"
+    assert refine_power_label_from_disclosure("发电") == "发电与供电业务"
+    assert refine_power_label_from_disclosure("电力板块") == "发电与供电业务"
+    assert refine_power_label_from_disclosure("蒸汽销售") == "热力供应"
 
 
 def test_bare_power_no_disclosure_explicit_label():
@@ -206,7 +210,7 @@ def test_power_comprehensive_refined_to_hydro_by_disclosure():
     )
     out = clf.classify("600900.SH")
     assert out.tags[0].domain_tag == DomainTag.DOMAIN_CUSTOM
-    assert out.tags[0].domain_label == "水电"
+    assert out.tags[0].domain_label == "水力发电"
 
 
 def test_power_fallback_multi_disclosure_tags():
@@ -224,8 +228,8 @@ def test_power_fallback_multi_disclosure_tags():
     )
     out = clf.classify("600900.SH")
     assert len(out.tags) == 2
-    assert out.tags[0].domain_label == "水电"
-    assert out.tags[1].domain_label == "售电"
+    assert out.tags[0].domain_label == "水力发电"
+    assert out.tags[1].domain_label == "售电业务"
     assert out.tags[1].confidence <= out.tags[0].confidence
 
 

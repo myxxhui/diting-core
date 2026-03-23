@@ -29,11 +29,17 @@ CREATE TABLE IF NOT EXISTS moe_expert_opinion_snapshot (
     symbol             VARCHAR(32)  NOT NULL,
     opinions_json      JSONB        NOT NULL DEFAULT '[]',
     correlation_id     VARCHAR(64)  NOT NULL DEFAULT '',
+    moe_run_metadata   JSONB        NOT NULL DEFAULT '{}'::jsonb,
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_moe_expert_opinion_batch ON moe_expert_opinion_snapshot(batch_id);
 CREATE INDEX IF NOT EXISTS idx_moe_expert_opinion_symbol ON moe_expert_opinion_snapshot(symbol);
 CREATE INDEX IF NOT EXISTS idx_moe_expert_opinion_created ON moe_expert_opinion_snapshot(created_at DESC);
+"""
+
+MIGRATION_ALTER = """
+ALTER TABLE moe_expert_opinion_snapshot
+  ADD COLUMN IF NOT EXISTS moe_run_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 """
 
 
@@ -55,9 +61,10 @@ def main():
             stmt = stmt.strip()
             if stmt:
                 cur.execute(stmt)
+        cur.execute(MIGRATION_ALTER.strip())
         cur.close()
         conn.close()
-        print("L2 表 moe_expert_opinion_snapshot 已就绪。")
+        print("L2 表 moe_expert_opinion_snapshot 已就绪（含 moe_run_metadata）。")
     except Exception as e:
         print("创建表失败: %s" % e, file=sys.stderr)
         sys.exit(1)

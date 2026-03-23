@@ -153,6 +153,105 @@ def get_top_segment_disclosure_batch(dsn: str, symbols: List[str]) -> Dict[str, 
     return out
 
 
+def get_segment_labels_and_shares_batch(
+    dsn: str, symbols: List[str], top_n: int = 3
+) -> Dict[str, List[Tuple[str, float]]]:
+    """
+    每只标的按营收占比降序的 (label, revenue_share) 列表，用于 垂直占比 展示。
+    优先用 segment_registry.name_cn，缺则 segment_label_cn；label 经 refine 规范化。
+    返回 symbol.upper() -> [(label, share), ...]，share 为 0~1。
+    """
+    if not dsn or not symbols or top_n < 1:
+        return {}
+    try:
+        import psycopg2
+    except ImportError:
+        return {}
+    try:
+        from diting.classifier.semantic import refine_power_label_from_disclosure
+    except ImportError:
+        def refine_power_label_from_disclosure(x: str):
+            return (x or "").strip() or None
+
+    syms = [s.strip().upper() for s in symbols if (s or "").strip()]
+    if not syms:
+        return {}
+
+    out: Dict[str, List[Tuple[str, float]]] = {}
+    try:
+        conn = psycopg2.connect(dsn)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT s.symbol, COALESCE(NULLIF(TRIM(r.name_cn), ''), s.segment_label_cn), s.revenue_share
+                FROM symbol_business_profile s
+                LEFT JOIN segment_registry r ON r.segment_id = s.segment_id
+                WHERE s.symbol = ANY(%s)
+                ORDER BY s.symbol, s.revenue_share DESC
+                """,
+                (syms,),
+            )
+            for sym, name_cn, rev in cur.fetchall():
+                k = (sym or "").strip().upper()
+                raw = (name_cn or "").strip() if name_cn else ""
+                refined = refine_power_label_from_disclosure(raw) if raw else None
+                label = (refined or raw or "其他").strip() or "其他"
+                lst = out.setdefault(k, [])
+                if len(lst) < top_n:
+                    lst.append((label, float(rev or 0)))
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("get_segment_labels_and_shares_batch: %s", e)
+        return {}
+    return out
+
+
+def get_latest_revenue_batch(dsn: str, symbols: List[str]) -> Dict[str, float]:
+    """
+    每只标的最新报告期营收（万元）。无 financial_summary 或表不存在时返回 {}。
+    """
+    if not dsn or not symbols:
+        return {}
+    try:
+        import psycopg2
+    except ImportError:
+        return {}
+    syms = [s.strip().upper() for s in symbols if (s or "").strip()]
+    if not syms:
+        return {}
+    out: Dict[str, float] = {}
+    try:
+        conn = psycopg2.connect(dsn)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT DISTINCT ON (symbol) symbol, revenue
+                FROM financial_summary
+                WHERE symbol = ANY(%s) AND revenue IS NOT NULL
+                ORDER BY symbol, report_date DESC
+                """,
+                (syms,),
+            )
+            for sym, rev in cur.fetchall():
+                k = (sym or "").strip().upper()
+                try:
+                    # 原始为元，转万元便于展示
+                    out[k] = float(rev or 0) / 10000.0
+                except (TypeError, ValueError):
+                    out[k] = 0.0
+            cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug("get_latest_revenue_batch: %s", e)
+        return {}
+    return out
+
+
 def make_business_segment_provider(
     dsn: str, symbols: List[str]
 ) -> Optional[Callable[[str], List[SegmentShare]]]:
