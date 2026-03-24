@@ -1,7 +1,7 @@
 # diting-core Makefile
 # [Ref: 03_原子目标与规约/_共享规约/02_三位一体仓库规约]
 
-.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production query-ingest-overview check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real sync-prod-conn ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast fetch-sector-symbols deps-ingest ingest-business-profile build-images build-module-a deps-classifier deps-scanner deps-scanner-alphalens diting prod run-module-a query-module-a-output init-l2-classifier-table init-l2-industry-revenue-table init-l2-business-profile-tables init-l2-segment-signal-cache refresh-segment-signals init-l2-b-module-tables run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table prune-l2-quant-scan-all factor-quality-smoke init-l2-symbol-names-table sync-symbol-names-csv test-scanner golden-scanner-batch run-module-c query-module-c-output verify-module-c init-l2-moe-opinion-table test-moe deps-moe
+.PHONY: test build test-docker verify verify-db-connection verify-data-test verify-data-production query-ingest-overview check-ohlcv-consistency ingest-test ingest-deploy ingest-test-real sync-prod-conn ingest-production ingest-production-background ingest-production-incremental ingest-production-fast ingest-production-incremental-fast fetch-sector-symbols deps-ingest ingest-business-profile build-images build-module-a deps-classifier deps-scanner deps-scanner-alphalens diting prod run-module-a query-module-a-output init-l2-classifier-table init-l2-industry-revenue-table init-l2-business-profile-tables migrate-l2-news-content-scope init-l2-a-track-signal-cache init-l2-segment-signal-cache refresh-segment-signals init-l2-b-module-tables run-module-b query-module-b-output verify-module-b init-l2-quant-signal-table prune-l2-quant-scan-all factor-quality-smoke init-l2-symbol-names-table sync-symbol-names-csv test-scanner golden-scanner-batch run-module-c run-full-pipeline query-full-pipeline-result query-module-c-output verify-module-c init-l2-moe-opinion-table test-moe deps-moe
 
 # 采集相关 target 使用的 Python：akshare 推荐 >= 3.9。Make 解析时用非交互 shell，需先加载 pyenv 才能找到 pyenv 安装的 3.9
 PYTHON_INGEST := $(shell export PYENV_ROOT="$$HOME/.pyenv" && [ -d "$$PYENV_ROOT/bin" ] && export PATH="$$PYENV_ROOT/bin:$$PATH" && eval "$$(pyenv init - 2>/dev/null)" 2>/dev/null; command -v python3.11 2>/dev/null || command -v python3.10 2>/dev/null || command -v python3.9 2>/dev/null || command -v python3.8 2>/dev/null || command -v python3 2>/dev/null)
@@ -207,7 +207,7 @@ build-module-b:
 	cd "$$root" && docker build --platform $(DOCKER_PLATFORM) -f docker/module_b/Dockerfile -t diting-module-b:latest .
 	@echo "build-module-b: diting-module-b:latest OK ($(DOCKER_PLATFORM))"
 
-# Stage3-01 一键本地运行 A 模块：加载 .env，执行分类，输出执行标的、执行结果、写入位置 [Ref: 01_语义分类器_实践]
+# Stage3-01 一键本地运行 A 模块：加载 .env，执行分类，输出执行结果、写入位置 [Ref: 01_语义分类器_实践]
 run-module-a: sync-prod-conn
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
 	_saved_ds="$$DITING_SYMBOLS"; _saved_mab="$$MODULE_AB_SYMBOLS"; \
@@ -257,6 +257,18 @@ init-l2-b-track-candidate:
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_b_track_candidate_snapshot.py
 
+# news_content：scope/scope_id 迁移（07_）；存量库须执行一次后再写入新闻
+migrate-l2-news-content-scope:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/migrate_l2_news_content_scope.py
+
+# A 轨双路信号缓存：标的新闻 + 申万行业新闻 打标结果；Module C 可读
+init-l2-a-track-signal-cache:
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/init_l2_a_track_signal_cache.py
+
 # segment_signal_cache：Module C 细分信号来源，信号层写入；表可先建空供 C 查询
 init-l2-segment-signal-cache:
 	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
@@ -269,8 +281,8 @@ refresh-segment-signals: sync-prod-conn
 	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
 	cd "$$root" && PYTHONPATH="$$root" python3 scripts/run_refresh_segment_signals.py
 
-init-l2-b-module-tables: init-l2-classifier-table init-l2-quant-signal-table init-l2-industry-revenue-table init-l2-business-profile-tables init-l2-segment-signal-cache
-	@echo "init-l2-b-module-tables OK（classifier_output_snapshot / quant_signal_* / industry_revenue_summary / segment_registry+symbol_business_profile / segment_signal_cache）"
+init-l2-b-module-tables: init-l2-classifier-table init-l2-quant-signal-table init-l2-industry-revenue-table init-l2-business-profile-tables migrate-l2-news-content-scope init-l2-a-track-signal-cache init-l2-segment-signal-cache
+	@echo "init-l2-b-module-tables OK（含 news_content scope 迁移、a_track_signal_cache、segment_signal_cache 等）"
 
 # Stage3-02 一键本地运行 B 模块：基于 A 同源标的执行扫描，结果写入 L2 quant_signal_snapshot 供 Module C 使用 [Ref: 02_量化扫描引擎_实践]（需先 make deps-scanner；L2 缺表时 make init-l2-b-module-tables）
 # macOS：Homebrew 安装的 ta-lib 为 libta-lib.dylib，Python 包需 libta_lib；若存在 .ta_lib_link 则加入 DYLD_LIBRARY_PATH
@@ -364,6 +376,20 @@ run-module-c-dev:
 	[ -d "$$root/.ta_lib_link" ] && export DYLD_LIBRARY_PATH="$$root/.ta_lib_link:/opt/homebrew/opt/ta-lib/lib:$${DYLD_LIBRARY_PATH:-}"; true; \
 	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
 	cd "$$root" && MOE_STUB_SEGMENT_SIGNALS=1 PYTHONPATH="$$root" $$py scripts/run_module_c_local.py
+
+# 全系统全链路：A→B→信号层 refresh→C 串联，一次命令完成全链路运行/测试 [Ref: 06_B轨_信号层_1对1对1]
+run-full-pipeline: sync-prod-conn
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	[ -d "$$root/.ta_lib_link" ] && export DYLD_LIBRARY_PATH="$$root/.ta_lib_link:/opt/homebrew/opt/ta-lib/lib:$${DYLD_LIBRARY_PATH:-}"; true; \
+	py="$(PYTHON_SCANNER)"; [ -z "$$py" ] && py=python3; \
+	cd "$$root" && PYTHONPATH="$$root" $$py scripts/run_full_pipeline.py
+
+# 全链路运行后 L2 汇总：A/B/信号层/C 最近 batch 与行数（便于与 run-full-pipeline 对照排查）[Ref: 06_B轨_信号层_1对1对1]
+query-full-pipeline-result: sync-prod-conn
+	@root="$$(dirname $(realpath $(firstword $(MAKEFILE_LIST))))"; \
+	[ -f "$$root/.env" ] && . "$$root/.env"; true; \
+	cd "$$root" && PYTHONPATH="$$root" python3 scripts/query_full_pipeline_result.py
 
 # Stage3-04 一键查询 C 写入：L2 moe_expert_opinion_snapshot
 query-module-c-output: sync-prod-conn

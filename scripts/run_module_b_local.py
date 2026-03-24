@@ -32,9 +32,23 @@ if _env.exists():
                     os.environ[k] = v
 
 
+def _pipeline_quiet() -> bool:
+    """全链路 make run-full-pipeline 时置 PIPELINE_QUIET=1，减少终端噪音。"""
+    return (os.environ.get("PIPELINE_QUIET") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _calibration_list_max() -> int:
+    raw = (os.environ.get("PIPELINE_CALIBRATION_LIST_MAX") or "32").strip()
+    try:
+        n = int(raw, 10)
+        return max(8, min(500, n))
+    except ValueError:
+        return 32
+
+
 def _module_b_print_max() -> Optional[int]:
     """
-    MODULE_B_PRINT_MAX：未设置或 0 = 不限制（确认档列表、执行标的清单默认全部打印）；
+    MODULE_B_PRINT_MAX：未设置或 0 = 不限制（确认档列表等默认全部打印；不打印执行标的清单以减少噪音）；
     正整数 = 最多打印多少行（极大名单时可设为 50 等避免刷屏）。
     """
     raw = (os.environ.get("MODULE_B_PRINT_MAX") or "").strip()
@@ -368,6 +382,8 @@ def main():
         skip_akshare=skip_akshare,
     )
 
+    _pq = _pipeline_quiet()
+
     # 可选：从 L2 读取 A 模块最新一批，用于「基于 A 处理过的数据」验证（同批标的一致）
     classifier_batch_id = None
     classifier_symbols = set()
@@ -380,15 +396,22 @@ def main():
 
     # L1 K 线数量检查：B 模块策略需每标至少 60 根日 K（建议 120 根）
     bar_counts = _query_l1_ohlcv_bars(ohlcv_dsn, universe)
+    l1_min_bars = None
+    l1_max_bars = None
+    l1_ok60_n = 0
     if bar_counts:
-        counts = [bar_counts.get(s, 0) for s in universe]
-        min_bars = min(counts)
-        max_bars = max(counts)
-        ok_60 = sum(1 for c in counts if c >= 60)
+        _bc = [bar_counts.get(s, 0) for s in universe]
+        l1_min_bars = min(_bc)
+        l1_max_bars = max(_bc)
+        l1_ok60_n = sum(1 for c in _bc if c >= 60)
+    if bar_counts and not _pq:
         n = len(universe)
         print("======== L1 数据是否满足 B 模块策略 ========  ")
-        print("  B 模块需求: 每标至少 60 根日 K（建议 120 根）；当前 %s 标: 最少 %s 根、最多 %s 根，满足≥60 根: %s/%s 只" % (n, min_bars, max_bars, ok_60, n))
-        if ok_60 < len(universe):
+        print(
+            "  B 模块需求: 每标至少 60 根日 K（建议 120 根）；当前 %s 标: 最少 %s 根、最多 %s 根，满足≥60 根: %s/%s 只"
+            % (n, l1_min_bars, l1_max_bars, l1_ok60_n, n)
+        )
+        if l1_ok60_n < len(universe):
             print("  说明: 部分标的 K 线不足 60 根时，该标的不参与打分或得分为 0。")
         print()
 
@@ -429,7 +452,7 @@ def main():
             for s in carry_extra:
                 s["symbol_name"] = symbol_to_name.get(s.get("symbol", ""), "") or s.get("symbol_name", "")
             signals.extend(carry_extra)
-    if meta:
+    if meta and not _pq:
         print()
         print("======== 粗筛 / 指数 regime / 冷却 / Classifier（本批统计，见 scanner_rules.yaml）========  ")
         bull = meta.get("index_ma_bullish")
@@ -495,7 +518,7 @@ def main():
         print()
 
     sm = getattr(scanner, "last_scan_metrics", None)
-    if sm:
+    if sm and not _pq:
         print("======== 性能与可观测性（scanner_run_metrics，见 scanner_performance）========  ")
         print(
             "  总耗时 %.1f ms | 拉取OHLCV %.1f | 分位 %.1f | L2预检 %.1f | 多池 %.1f | 板块 %.1f | 组装输出 %.1f"
@@ -516,119 +539,146 @@ def main():
             print("  scanner_rules.yaml 指纹(sha256 前16hex，与 L2 行一致): %s" % _fp)
         print()
 
-    print()
-    _pb_max = _module_b_print_max()
-    uni_show, uni_trunc = _take_with_ellipsis(universe, _pb_max)
-    print(
-        "======== 执行标的（共 %s 只，与 Module A 同源；数据源: TIMESCALE_DSN 生产数据）========  "
-        % len(universe)
-    )
-    if _pb_max is None:
-        print("  （默认全部列出；大名单可设 MODULE_B_PRINT_MAX=N 仅显示前 N 行）")
-    for i, s in enumerate(uni_show, 1):
-        print("  %s. %s" % (i, s))
-    if uni_trunc:
-        print("  ... 仅显示前 %s 行，共 %s 只（MODULE_B_PRINT_MAX=%s）" % (len(uni_show), len(universe), _pb_max))
-    print()
-
-    if classifier_batch_id and classifier_symbols:
-        print("======== 基于 A 模块数据（L2 最新 batch）========  ")
-        print("  classifier_output_snapshot 最新 batch_id: %s，标的数: %s" % (classifier_batch_id[:32] + "..", len(classifier_symbols)))
-        print()
-
     passed_list = [s for s in signals if s.get("passed")]
     snapshot_list = [s for s in signals if s.get("confirmed_passed") or s.get("alert_passed")]
     ats = getattr(scanner, "_a_track", {}) or {}
     threshold = getattr(scanner, "_score_threshold", 70)
     alert_t = ats.get("alert_threshold", max(40, threshold - 15))
     prof = ats.get("signal_profile", "balanced")
-    print("======== B 模块扫描结果（全量保存当前分数，通过/未通过分开存放）========  ")
-    print(
-        "  A 轨短线模式: signal_profile=%s；确认档≥%s、预警档≥%s（dual_tier=%s）；打分为 [0,100] 连续分"
-        % (prof, threshold, alert_t, ats.get("dual_tier", True))
-    )
-    print("  全量条数: %s（均已打分）  确认档通过: %s  写入通过表(预警+确认): %s" % (len(signals), len(passed_list), len(snapshot_list)))
-    n_alert_only = sum(1 for s in signals if s.get("alert_passed") and not s.get("confirmed_passed"))
-    print(
-        "  说明: 「确认档通过」= passed，仅总分≥%s 且满足板块/收紧等条件；「写入通过表」= 确认档 ∪ 预警档（dual_tier：仅达预警≥%s 未达确认也写入 snapshot，供 Module C）。"
-        " 本批分解: 确认 %s + 仅预警 %s = %s。"
-        % (threshold, alert_t, len(passed_list), n_alert_only, len(snapshot_list))
-    )
-    print("  说明: 得分 0 表示四池（趋势/反转/突破/动量）条件均未形成有效子分，并非未打分；下方「各池得分」可看出策略与打分是否生效。")
-    if passed_list:
-        passed_by_score = sorted(
-            passed_list,
-            key=lambda x: (-float(x.get("technical_score") or 0), x.get("symbol") or ""),
-        )
-        passed_show, passed_trunc = _take_with_ellipsis(passed_by_score, _pb_max)
+
+    if not _pq:
+        print()
+        _pb_max = _module_b_print_max()
+
+        if classifier_batch_id and classifier_symbols:
+            print("======== 基于 A 模块数据（L2 最新 batch）========  ")
+            print("  classifier_output_snapshot 最新 batch_id: %s，标的数: %s" % (classifier_batch_id[:32] + "..", len(classifier_symbols)))
+            print()
+
+        print("======== B 模块扫描结果（全量保存当前分数，通过/未通过分开存放）========  ")
         print(
-            "  本批确认档通过标的（passed=True，得分≥%s，按总分降序，共 %s 条%s）："
-            % (
-                threshold,
-                len(passed_list),
-                "；仅显示前 %s 行（MODULE_B_PRINT_MAX=%s）" % (_pb_max, _pb_max)
-                if passed_trunc
-                else "；全部列出",
-            )
+            "  A 轨短线模式: signal_profile=%s；确认档≥%s、预警档≥%s（dual_tier=%s）；打分为 [0,100] 连续分"
+            % (prof, threshold, alert_t, ats.get("dual_tier", True))
         )
-        for s in passed_show:
-            sym = s.get("symbol", getattr(s, "symbol", ""))
-            name = s.get("symbol_name", "") or ""
-            score = s.get("technical_score", getattr(s, "technical_score", 0))
-            src_name, src_cn, pool_str = _strategy_display(s)
+        print("  全量条数: %s（均已打分）  确认档通过: %s  写入通过表(预警+确认): %s" % (len(signals), len(passed_list), len(snapshot_list)))
+        n_alert_only = sum(1 for s in signals if s.get("alert_passed") and not s.get("confirmed_passed"))
+        print(
+            "  说明: 「确认档通过」= passed，仅总分≥%s 且满足板块/收紧等条件；「写入通过表」= 确认档 ∪ 预警档（dual_tier：仅达预警≥%s 未达确认也写入 snapshot，供 Module C）。"
+            " 本批分解: 确认 %s + 仅预警 %s = %s。"
+            % (threshold, alert_t, len(passed_list), n_alert_only, len(snapshot_list))
+        )
+        print("  说明: 得分 0 表示四池（趋势/反转/突破/动量）条件均未形成有效子分，并非未打分；下方「各池得分」可看出策略与打分是否生效。")
+        if passed_list:
+            passed_by_score = sorted(
+                passed_list,
+                key=lambda x: (-float(x.get("technical_score") or 0), x.get("symbol") or ""),
+            )
+            passed_show, passed_trunc = _take_with_ellipsis(passed_by_score, _pb_max)
             print(
-                "    %s  %s  technical_score=%.2f  策略=%s(%s)  各池得分: %s"
-                % (sym, name or "(无中文名)", score, src_name, src_cn, pool_str or "-")
+                "  本批确认档通过标的（passed=True，得分≥%s，按总分降序，共 %s 条%s）："
+                % (
+                    threshold,
+                    len(passed_list),
+                    "；仅显示前 %s 行（MODULE_B_PRINT_MAX=%s）" % (_pb_max, _pb_max)
+                    if passed_trunc
+                    else "；全部列出",
+                )
             )
-        if passed_trunc:
-            print("    ... 共 %s 条确认档，上表仅前 %s 行" % (len(passed_list), len(passed_show)))
-    if snapshot_list:
-        snap_sorted = sorted(
-            snapshot_list,
-            key=lambda x: (
-                -float(x.get("technical_score") or 0),
-                x.get("symbol") or "",
-            ),
-        )
-        print("======== 风控参考（写入 snapshot · 按总分降序 · 单位：元）========  ")
+            for s in passed_show:
+                sym = s.get("symbol", getattr(s, "symbol", ""))
+                name = s.get("symbol_name", "") or ""
+                score = s.get("technical_score", getattr(s, "technical_score", 0))
+                src_name, src_cn, pool_str = _strategy_display(s)
+                print(
+                    "    %s  %s  technical_score=%.2f  策略=%s(%s)  各池得分: %s"
+                    % (sym, name or "(无中文名)", score, src_name, src_cn, pool_str or "-")
+                )
+            if passed_trunc:
+                print("    ... 共 %s 条确认档，上表仅前 %s 行" % (len(passed_list), len(passed_show)))
+        if snapshot_list:
+            snap_sorted = sorted(
+                snapshot_list,
+                key=lambda x: (
+                    -float(x.get("technical_score") or 0),
+                    x.get("symbol") or "",
+                ),
+            )
+            print("======== 风控参考（写入 snapshot · 按总分降序 · 单位：元）========  ")
+            print(
+                "  共 %s 条；入场=最后一根日线收盘；止损/止盈与 L2 字段 stop_loss_price、take_profit_json 一致。"
+                " 盈亏%%=(价-入场)/入场×100%%（止损%% 多为负表示触及止损的亏损幅度）。"
+                " 下列已按「显示宽度」对齐，适配中文终端。"
+                % len(snap_sorted)
+            )
+            _print_risk_snapshot_table(snap_sorted)
+        if signals and snapshot_list:
+            print()
+            print(
+                "  说明: 总分与排名会随「最新一根日 K」及全截面分位（如动量池）变化；"
+                "不同交易日或 L1 数据更新后重跑，荣昌生物/宁德时代等是否仍最高不固定。"
+            )
+            print()
+            _print_pool_score_table(
+                snapshot_list,
+                "确认档∪预警档标的·池打分明细（写入 snapshot 供 Module C；不含未通过标的）",
+                sort_by_score_desc=True,
+            )
+            print("  提示: 止损/止盈与盈亏%%见上方「风控参考」表；本段为各池打分，不含 stop_loss / take_profit。")
+        print()
+    else:
+        from diting.pipeline_io import pipeline_frame_quiet
+
+        pipeline_frame_quiet()
+        print()
+        print("======== Module B（管道精简）========  ")
         print(
-            "  共 %s 条；入场=最后一根日线收盘；止损/止盈与 L2 字段 stop_loss_price、take_profit_json 一致。"
-            " 盈亏%%=(价-入场)/入场×100%%（止损%% 多为负表示触及止损的亏损幅度）。"
-            " 下列已按「显示宽度」对齐，适配中文终端。"
-            % len(snap_sorted)
+            "  全量=%s 确认档=%s 快照(确认∪预警)=%s | batch_id=%s"
+            % (len(signals), len(passed_list), len(snapshot_list), batch_id)
         )
-        _print_risk_snapshot_table(snap_sorted)
-    if signals:
-        print("  全量样例（前 10 条，含未通过）：标的 | 中文名 | 得分 | 策略(中文) | 各池得分 | 是否通过")
-        for s in signals[:10]:
-            sym = s.get("symbol", getattr(s, "symbol", ""))
-            name = s.get("symbol_name", "") or ""
-            score = s.get("technical_score", getattr(s, "technical_score", 0))
-            src_name, src_cn, pool_str = _strategy_display(s)
-            p = s.get("passed", False)
-            print("    %s  %s  technical_score=%.2f  %s(%s)  %s  passed=%s" % (sym, name or "-", score, src_name, src_cn, pool_str or "-", p))
-        if len(signals) > 10:
-            print("    ... 共 %s 条" % len(signals))
+        if bar_counts and l1_min_bars is not None:
+            print(
+                "  [L1→B] %s 标: 日K 最少 %s 根、最多 %s 根，≥60根 %s/%s（不足则该标常无 scan 行/0 分）"
+                % (len(universe), l1_min_bars, l1_max_bars, l1_ok60_n, len(universe))
+            )
+        if dsn and classifier_batch_id:
+            print(
+                "  [A→B] L2 classifier 最新 batch_id=%s（标的 %s 只）"
+                % (classifier_batch_id, len(classifier_symbols))
+            )
+        if _pq and dsn and classifier_symbols:
+            u_set = {(s or "").strip().upper() for s in universe}
+            cs_set = {(s or "").strip().upper() for s in classifier_symbols}
+            inter = u_set & cs_set
+            only_u = sorted(u_set - cs_set)
+            only_c = sorted(cs_set - u_set)
+            cap = _calibration_list_max()
+            print(
+                "  [人眼校准] universe∩L2(classifier 最新批)=%s 只 | 仅 universe 有 %s | 仅 classifier 有 %s"
+                % (len(inter), len(only_u), len(only_c))
+            )
+            if only_u:
+                print("    仅 universe(前 %s): %s" % (cap, ", ".join(only_u[:cap])))
+            if only_c:
+                print("    仅 classifier(前 %s): %s" % (cap, ", ".join(only_c[:cap])))
+        if meta:
+            print(
+                "  [门控/扫描] 粗筛跳过 %s | 冷却跳过 %s | classifier 门控跳过 %s | TA-Lib 打分 %s 只"
+                % (
+                    meta.get("skipped_after_coarse"),
+                    meta.get("skipped_cooldown"),
+                    meta.get("skipped_classifier_gate"),
+                    meta.get("symbols_talib_scored"),
+                )
+            )
+        if carry_extra:
+            print("  [冷却沿用 L2] 并入本批 %s 只（分数为上次快照，本轮未重算 TA）" % len(carry_extra))
+        if sm:
+            print(
+                "  [性能] 总耗时 %.0f ms | 并行输出条数 %s"
+                % (sm.get("ms_total", 0), sm.get("symbols_out"))
+            )
+        print("  完整终端输出请: make run-module-b ；L2 汇总: make query-full-pipeline-result")
         print()
-        print(
-            "  说明: 总分与排名会随「最新一根日 K」及全截面分位（如动量池）变化；"
-            "不同交易日或 L1 数据更新后重跑，荣昌生物/宁德时代等是否仍最高不固定。"
-        )
-        passed_only = [s for s in signals if s.get("passed")]
-        print()
-        _print_pool_score_table(
-            passed_only,
-            "确认档通过标的·池打分明细（passed=True，即总分≥确认阈值且满足收紧条件）",
-            sort_by_score_desc=True,
-        )
-        print()
-        _print_pool_score_table(
-            signals,
-            "全部标的详细打分（含未通过；顺序与本次扫描处理顺序一致）",
-            sort_by_score_desc=False,
-        )
-        print("  提示: 止损/止盈与盈亏%%仅出现在上方「风控参考」表；本段为全量池打分，不含 stop_loss / take_profit。")
-    print()
 
     n_written_snapshot = 0
     n_written_scan_all = 0
@@ -648,8 +698,25 @@ def main():
 
     print("======== 写入 L2（通过表供 Module C，全量表供查询）========  ")
     print("  %s" % write_location)
+    if _pq and dsn and signals:
+        snap_n = len([s for s in signals if s.get("confirmed_passed") or s.get("alert_passed")])
+        ok_s = (n_written_scan_all == len(signals) and n_written_snapshot == snap_n)
+        print(
+            "  [人眼校准] L2 写入 vs 内存信号: scan_all=%s/%s 行 | snapshot=%s/%s 行 | %s"
+            % (
+                n_written_scan_all,
+                len(signals),
+                n_written_snapshot,
+                snap_n,
+                "OK" if ok_s else "NG 须核对表约束/门控",
+            )
+        )
     print()
     print("======== B→C 数据交换（L2；与 C 对齐用 batch_id）========  ")
+    if _pq:
+        print("  ── 下一模块 信号层 refresh → Module C 依赖 ──")
+        print("  · refresh 默认从 quant_signal_snapshot「最近 batch」取标的（即本批刚写入），细分结果进 segment_signal_cache。")
+        print("  · Module C 右脑读 segment_signal_cache；量化门控读本批 quant_signal_snapshot / scan_all。强锁本批可: export MOE_QUANT_BATCH_ID=<下行 batch_id>。")
     print("  表1 quant_signal_snapshot：本批「确认∪预警」档行，供 Module C 默认 MOE_C_SCOPE=snapshot（与写入行数一致）。")
     print("  表2 quant_signal_scan_all：全量打分（含未通过）；C 在 MOE_PIPELINE=snapshot 时按 MOE_QUANT_BATCH_ID 读 B。")
     print("  本批 batch_id（请完整复制，与 L2 两表 correlation 一致）:")
@@ -681,6 +748,34 @@ def main():
     print("======== 输出是否符合预期 ========  ")
     print("  执行标的数=%s，全量保存=%s，通过=%s；L2 全量写入=%s，通过表写入=%s" % (len(universe), len(signals), len(passed_list), n_written_scan_all, n_written_snapshot))
     print("  是否符合预期: %s" % ("是" if expect_ok else "否（请检查 PG_L2_DSN 或执行 make init-l2-quant-signal-table）"))
+    if _pq:
+        du = len(universe) - len(signals)
+        n_alert_only = sum(1 for s in signals if s.get("alert_passed") and not s.get("confirmed_passed"))
+        gap_l1 = (len(universe) - l1_ok60_n) if bar_counts else du
+        if du == 0:
+            du_note = "universe 与 scan 全量条数对齐"
+        elif bar_counts and du == gap_l1:
+            du_note = "差值与「universe−L1≥60根」只数一致 → 设计允许（不足根常无 scan 行）"
+        else:
+            du_note = "请核对扫描日志/配置是否与 universe 一致"
+        print()
+        print("  ┌─ 模块 B 准出（设计对照 · 判断能否进入 refresh/C）────────────────")
+        print("  │ ① universe vs scan 全量: %s vs %s | %s" % (len(universe), len(signals), du_note))
+        if l1_min_bars is not None:
+            print(
+                "  │ ② L1: ≥60 根 %s/%s 只 | 最少/最多日K=%s/%s"
+                % (l1_ok60_n, len(universe), l1_min_bars, l1_max_bars)
+            )
+        print(
+            "  │ ③ 策略分层: 确认档(passed)=%s | 仅预警=%s | snapshot 写入=%s（C 默认用 snapshot）"
+            % (len(passed_list), n_alert_only, len(snapshot_list))
+        )
+        print("  │ ④ L2: 上表「是否符合预期」= 写入与内存条数一致；batch_id 供下游对齐")
+        print(
+            "  │ ⑤ 结论: %s"
+            % ("可进入 refresh / Module C" if expect_ok else "请先修复 L2 写入或门控再往下游")
+        )
+        print("  └──────────────────────────────────────────────────────────────")
     print()
     sys.exit(0 if expect_ok else 1)
 

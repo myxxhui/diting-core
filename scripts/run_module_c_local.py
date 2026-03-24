@@ -41,6 +41,10 @@ if _env.exists():
                     os.environ[k] = v
 
 
+def _pipeline_quiet() -> bool:
+    return (os.environ.get("PIPELINE_QUIET") or "").strip().lower() in ("1", "true", "yes")
+
+
 def _domain_tags_zh(out) -> List[str]:
     from diting.protocols.classifier_pb2 import DomainTag
 
@@ -268,20 +272,48 @@ def _ab_alignment_warnings(
     sym_to_quant: Dict[str, Any],
     universe: List[str],
 ) -> List[str]:
-    """A/B L2 行数或 universe 内 symbol 交集不一致时的可读告警（不阻断运行）。"""
+    """
+    A/B L2 行数或 universe 内 symbol 交集不一致时的可读说明（不阻断运行）。
+    前缀 [设计口径]：与「A 全覆盖 universe、B 仅对产出 scan 行的标的有 quant」一致，非批次漂移。
+    """
     out: List[str] = []
-    if use_l2_or_a_snap and n_a_rows != n_b_rows:
-        out.append(
-            "L2 classifier 行数(%s) ≠ quant_scan_all(%s)：请核对 MOE_CLASSIFIER_BATCH_ID / MOE_QUANT_BATCH_ID 是否与 A、B 同一业务跑批一致，或重跑 make run-module-a / make run-module-b"
-            % (n_a_rows, n_b_rows)
-        )
-    if use_l2_or_a_snap and a_rows and sym_to_quant and universe:
-        u_set = {str(s).strip().upper() for s in universe if s and str(s).strip()}
-        ak = set(a_rows.keys()) & u_set
-        bk = set(sym_to_quant.keys()) & u_set
-        only_a = len(ak - bk)
-        only_b = len(bk - ak)
-        if only_a or only_b:
+    if not use_l2_or_a_snap:
+        return out
+
+    u_set = {str(s).strip().upper() for s in universe if s and str(s).strip()} if universe else set()
+    ak = set(a_rows.keys()) & u_set if a_rows and u_set else set()
+    bk = set(sym_to_quant.keys()) & u_set if sym_to_quant and u_set else set()
+    only_a = len(ak - bk)
+    only_b = len(bk - ak)
+
+    explained = False
+    if n_a_rows != n_b_rows:
+        if n_a_rows > n_b_rows and only_b == 0 and only_a == (n_a_rows - n_b_rows):
+            out.append(
+                "[设计口径] L2 classifier=%s 行、quant_scan_all=%s 行，差 %s：与 universe 内「仅 classifier 有、B 无 scan 行」=%s 只一致（多为 L1 不足/未写入 scan_all），非 A/B 批次漂移"
+                % (n_a_rows, n_b_rows, n_a_rows - n_b_rows, only_a)
+            )
+            explained = True
+        elif n_b_rows > n_a_rows and only_a == 0 and only_b == (n_b_rows - n_a_rows):
+            out.append(
+                "[设计口径] quant_scan_all=%s 行多于 classifier=%s 行，差 %s：与 universe 内「仅 B 有」=%s 只一致；请核对是否误读 B 批次或 classifier 未覆盖"
+                % (n_b_rows, n_a_rows, n_b_rows - n_a_rows, only_b)
+            )
+            explained = True
+        else:
+            out.append(
+                "L2 classifier 行数(%s) ≠ quant_scan_all(%s)：请核对 MOE_CLASSIFIER_BATCH_ID / MOE_QUANT_BATCH_ID 是否与 A、B 同一业务跑批一致，或重跑 make run-module-a / make run-module-b"
+                % (n_a_rows, n_b_rows)
+            )
+
+    if only_a or only_b:
+        skip_drift = False
+        if explained:
+            if n_a_rows > n_b_rows and only_b == 0 and only_a == (n_a_rows - n_b_rows):
+                skip_drift = True
+            if n_b_rows > n_a_rows and only_a == 0 and only_b == (n_b_rows - n_a_rows):
+                skip_drift = True
+        if not skip_drift:
             out.append(
                 "universe 内 A 快照与 B 量化 symbol 不一致：仅 A 有 %s 只、仅 B 有 %s 只（批次或名单漂移）"
                 % (only_a, only_b)
@@ -750,6 +782,19 @@ def main() -> int:
 
     packed: List[Tuple[Dict[str, Any], str, Any, Optional[str], List[str]]] = []
 
+    ind_by_sym: Dict[str, str] = {}
+    if track == "a" and pg_l2:
+        try:
+            from diting.classifier.l2_provider import get_l2_industry_revenue_batch
+
+            _syms_all = [str(x.symbol or "").strip().upper() for x in clf_results]
+            ind_by_sym = {
+                k: (v[0] or "").strip()
+                for k, v in get_l2_industry_revenue_batch(pg_l2, _syms_all).items()
+            }
+        except Exception:
+            pass
+
     for out in clf_results:
         sym = str(out.symbol or "").strip().upper()
         quant_signal = sym_to_quant.get(sym) or {}
@@ -777,6 +822,24 @@ def main() -> int:
             if seg_ids:
                 from diting.moe.segment_signal_reader import fetch_segment_signals_for_segments
                 segment_signals = fetch_segment_signals_for_segments(pg_l2, seg_ids)
+
+        if not stub and track == "a" and pg_l2:
+            try:
+                from diting.moe.a_track_signal_reader import (
+                    fetch_a_track_signals_for_symbol,
+                    merge_a_track_into_segment_signals,
+                )
+
+                _at = fetch_a_track_signals_for_symbol(pg_l2, sym, ind_by_sym.get(sym, ""))
+                segment_list, segment_signals = merge_a_track_into_segment_signals(
+                    track,
+                    segment_list,
+                    segment_signals,
+                    _at.get("symbol"),
+                    _at.get("industry"),
+                )
+            except Exception:
+                pass
 
         router_domain = resolve_router_domain_tag(domain_tags, None)
 
@@ -837,6 +900,10 @@ def main() -> int:
 
     a_src = "L2" if use_a_snapshot else "内存分类"
     b_src = "L2" if use_l2_only else "本机 QuantScanner"
+    if _pipeline_quiet():
+        from diting.pipeline_io import pipeline_frame_quiet
+
+        pipeline_frame_quiet()
     print()
     print("────────────────────────────────────────────────────────")
     print("  Module C（MoE）")
@@ -904,8 +971,47 @@ def main() -> int:
             "    [提示] stub=关：使用真实 segment_signal_cache；无数据时输出「上游无数据」"
         )
     for aw in ab_warnings:
-        print("    [警告] %s" % aw)
+        if aw.startswith("[设计口径]"):
+            print("    %s" % aw)
+        else:
+            print("    [警告] %s" % aw)
     print("────────────────────────────────────────────────────────")
+
+    if _pipeline_quiet():
+        print()
+        print("  ┌─ 模块 C 准出（设计对照 · 可判断是否满足 Stage2 1:1:1）────────────────")
+        print("  │ ① 数据路径: pipeline=%s | A/B 来源=%s/%s" % (pipeline, a_src, b_src))
+        print(
+            "  │ ② 策略门控: scope=%s | stub=%s | VC=%s | 量化门控=%s"
+            % (scope_mode, stub, enable_vc, "开" if require_qp else "关")
+        )
+        print(
+            "  │ ③ L2 行数: classifier=%s | quant_scan_all=%s（与 B 终端「全量条数」同源）"
+            % (n_a_rows, n_b_rows)
+        )
+        print(
+            "  │ ④ B 档结构: 确认=%s | 仅预警=%s | 快照合计=%s（MoE snapshot 应对齐③④）"
+            % (n_b_conf, n_b_alert_only, n_b_snap)
+        )
+        print(
+            "  │ ⑤ 本批 MoE: 处理明细=%s 条 | universe=%s | 短轨 OK=%s / 不予支持=%s"
+            % (n_sym, n_universe, n_short_ok, n_short_unsupported)
+        )
+        if scope_mode == "snapshot":
+            mismatch = n_b_snap != n_sym and n_sym > 0
+            print(
+                "  │ ⑥ snapshot 准出: B 快照合计 %s vs MoE 条数 %s → %s %s"
+                % (
+                    n_b_snap,
+                    n_sym,
+                    "通过" if not mismatch else "不通过",
+                    "" if not mismatch else "（查 MOE_QUANT_BATCH_ID / 门控）",
+                )
+            )
+        n_warn = sum(1 for w in ab_warnings if not w.startswith("[设计口径]"))
+        n_note = len(ab_warnings) - n_warn
+        print("  │ ⑦ 对齐说明: 设计口径条=%s | 真告警条=%s（见上文）" % (n_note, n_warn))
+        print("  └──────────────────────────────────────────────────────────────")
 
     env_pa = (os.environ.get("MOE_C_PRINT_ALL") or "").strip().lower()
     if env_pa in ("0", "false", "no"):
@@ -983,6 +1089,15 @@ def main() -> int:
     if expect_ok and stub:
         exit_note = "符合预期（stub 联调；生产请关 stub）"
     print("  处理=%s 只 | 短轨 OK=%s | L2 写入=%s | %s" % (n_sym, n_short_ok, n_written, exit_note))
+    if _pipeline_quiet():
+        print("  ── 全链路可追溯 ──")
+        print("    · L2 汇总 A/B/信号层/C 批次与对齐告警: make query-full-pipeline-result")
+        if write_id:
+            print("    · 本批写入 batch_id=%s（表 moe_expert_opinion_snapshot）" % write_id)
+        if quant_batch_hint:
+            print("    · 对齐的 B quant_batch_id=%s" % quant_batch_hint)
+        if snapshot_batch_hint:
+            print("    · 对齐的 A classifier_batch_id=%s" % snapshot_batch_hint)
     print()
     return 0
 

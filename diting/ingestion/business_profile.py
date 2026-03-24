@@ -15,6 +15,7 @@ import psycopg2
 
 from diting.ingestion.config import get_pg_l2_dsn
 from diting.ingestion.industry_revenue import _apply_akshare_proxy
+from diting.ingestion.segment_tier import DISCLOSURE_DEFAULT_TIER
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,17 @@ def infer_domain_from_industry(industry_name: str) -> str:
     if any(k in s for k in ("农林牧渔", "种植", "养殖", "渔业", "农业", "粮食", "饲料")):
         return "农业"
     return "宏观"
+
+
+def infer_sub_domain_from_industry(industry_name: str) -> str:
+    """
+    申万行业名 → segment_registry.sub_domain（赛道/板块，与三分类 domain 正交）。
+    当前策略：取 industry_name 截断至 64 字符；后续可接归一化词典。
+    """
+    s = (industry_name or "").strip()
+    if not s:
+        return ""
+    return s[:64] if len(s) > 64 else s
 
 
 def _should_skip_row(label: str, share: float) -> bool:
@@ -151,6 +163,7 @@ def upsert_business_profile_rows(
         return 0
 
     domain = infer_domain_from_industry(industry_name)
+    sub_domain = infer_sub_domain_from_industry(industry_name)
     cur = conn.cursor()
     try:
         cur.execute("DELETE FROM symbol_business_profile WHERE symbol = %s", (sym,))
@@ -161,14 +174,18 @@ def upsert_business_profile_rows(
             is_pri = i == 0
             cur.execute(
                 """
-                INSERT INTO segment_registry (segment_id, domain, name_cn, updated_at)
-                VALUES (%s, %s, %s, NOW())
+                INSERT INTO segment_registry (
+                    segment_id, domain, name_cn, sub_domain, segment_tier, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (segment_id) DO UPDATE SET
                     domain = EXCLUDED.domain,
                     name_cn = EXCLUDED.name_cn,
+                    sub_domain = EXCLUDED.sub_domain,
+                    segment_tier = EXCLUDED.segment_tier,
                     updated_at = NOW()
                 """,
-                (seg_id, domain, label[:256]),
+                (seg_id, domain, label[:256], sub_domain or None, DISCLOSURE_DEFAULT_TIER),
             )
             cur.execute(
                 """

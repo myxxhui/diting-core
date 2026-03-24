@@ -48,25 +48,37 @@ def write_news_content_batch(
 ) -> int:
     """
     批量写入 news_content 表。每行元组：
-    (symbol, source, source_type, title, content, url, keywords, published_at)
-    Python 端计算 title_hash = md5(title)，使用 (symbol, title_hash, published_at) 去重；
-    冲突时更新 content/url/keywords。返回实际插入/更新的行数。
+    - 8 元组：(symbol, source, source_type, title, content, url, keywords, published_at)
+      → scope='symbol', scope_id=symbol（与 07_ 一致）
+    - 10 元组：末尾加 (scope, scope_id)；行业新闻可 symbol=NULL, scope='industry', scope_id=申万名
+    Python 端计算 title_hash；唯一键 (scope, scope_id, title_hash, published_at)。
     """
     if not rows:
         return 0
     import hashlib
     expanded = []
     epoch = datetime(1970, 1, 1)
-    for symbol, source, source_type, title, content, url, keywords, pub_at in rows:
+    for row in rows:
+        if len(row) >= 10:
+            symbol, source, source_type, title, content, url, keywords, pub_at, scope, scope_id = row[:10]
+        else:
+            symbol, source, source_type, title, content, url, keywords, pub_at = row[:8]
+            scope, scope_id = "symbol", (symbol or "").strip()
         title_hash = hashlib.md5(title.encode("utf-8")).hexdigest()
-        expanded.append((symbol, source, source_type, title, title_hash, content, url, keywords, pub_at or epoch))
+        sym = symbol if (symbol or "").strip() else None
+        sc = (scope or "symbol").strip() or "symbol"
+        sid = (scope_id or "").strip()
+        if sc == "symbol" and not sid and sym:
+            sid = sym
+        expanded.append((sym, source, source_type, title, title_hash, content, url, keywords, pub_at or epoch, sc, sid))
     sql = """
-    INSERT INTO news_content (symbol, source, source_type, title, title_hash, content, url, keywords, published_at)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (symbol, title_hash, published_at)
+    INSERT INTO news_content (symbol, source, source_type, title, title_hash, content, url, keywords, published_at, scope, scope_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (scope, scope_id, title_hash, published_at)
     DO UPDATE SET content  = EXCLUDED.content,
                   url      = EXCLUDED.url,
-                  keywords = EXCLUDED.keywords
+                  keywords = EXCLUDED.keywords,
+                  symbol   = COALESCE(EXCLUDED.symbol, news_content.symbol)
     """
     cur = conn.cursor()
     try:

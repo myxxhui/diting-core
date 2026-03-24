@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# [Ref: 01_语义分类器_实践] 一键本地运行 A 模块：输出执行标的、执行结果、写入位置
+# [Ref: 01_语义分类器_实践] 一键本地运行 A 模块：输出执行结果、写入位置（不打印执行标的清单以减少噪音）
 # 用法：在 diting-core 根目录 make run-module-a 或 PYTHONPATH=. python3 scripts/run_module_a_local.py
 
 import os
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -26,6 +27,19 @@ if _env.exists():
                     os.environ[k] = v
 
 _DOMAIN_TAG_NAMES = {0: "未指定", 1: "农业", 2: "科技", 3: "宏观", 4: "未知", 5: ""}
+
+
+def _pipeline_quiet() -> bool:
+    return (os.environ.get("PIPELINE_QUIET") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _calibration_list_max() -> int:
+    raw = (os.environ.get("PIPELINE_CALIBRATION_LIST_MAX") or "32").strip()
+    try:
+        n = int(raw, 10)
+        return max(8, min(500, n))
+    except ValueError:
+        return 32
 
 
 def main():
@@ -104,38 +118,43 @@ def main():
     batch_id = str(uuid.uuid4())
     results = clf.classify_batch(universe, correlation_id=batch_id)
 
-    print()
-    print("======== 执行标的（共 %s 只，来源: DITING_SYMBOLS / config/diting_symbols.txt）========  " % len(universe))
-    for i, s in enumerate(universe, 1):
-        print("  %s. %s" % (i, s))
-    print()
-
-    print("======== 执行结果（领域标签 + 主营披露）========  ")
-    print("  置信度：分类器对「领域标签」首项的确信程度，0~1。")
-    print("  【领域标签】= 申万行业（L2 industry_revenue_summary + industry_fallback）+ config/classifier_rules.yaml；")
-    print("    申万仅「电力」等需财报分部细化的场景，再叠加 L2 主营披露映射（见 09_/12_ 规约）。")
-    print("  【主营披露】= L2 symbol_business_profile×segment_registry 的财报分部，与申万行业不是同一数据源。")
-    print("  多标签时：首项为领域主类，其余可为从披露名映射的运营/垂直子类（如水电、售电）。")
-    for out in results:
-        tag_strs = []
-        for t in out.tags:
-            name = getattr(t, "domain_label", None) or _DOMAIN_TAG_NAMES.get(getattr(t, "domain_tag", 4), str(getattr(t, "domain_tag", 4)))
-            if name:
-                tag_strs.append(name)
-        conf = out.tags[0].confidence if out.tags else 0.0
-        extra = ""
-        sk = (out.symbol or "").strip().upper()
-        if segment_top1_name_provider is not None:
-            row = seg_top1.get(sk)
-            if row and (row[0] or "").strip():
-                nm, rv = row[0], row[1]
-                extra = " | 主营披露 Top1: %s（%.1f%%）" % (nm, rv * 100.0)
+    if not _pipeline_quiet():
+        print()
+        print("======== 执行结果（领域标签 + 主营披露；本批共 %s 只）========  " % len(universe))
+        print("  置信度：分类器对「领域标签」首项的确信程度，0~1。")
+        print("  【领域标签】= 申万行业（L2 industry_revenue_summary + industry_fallback）+ config/classifier_rules.yaml；")
+        print("    申万仅「电力」等需财报分部细化的场景，再叠加 L2 主营披露映射（见 09_/12_ 规约）。")
+        print("  【主营披露】= L2 symbol_business_profile×segment_registry 的财报分部，与申万行业不是同一数据源。")
+        print("  多标签时：首项为领域主类，其余可为从披露名映射的运营/垂直子类（如水电、售电）。")
+        for out in results:
+            tag_strs = []
+            for t in out.tags:
+                name = getattr(t, "domain_label", None) or _DOMAIN_TAG_NAMES.get(getattr(t, "domain_tag", 4), str(getattr(t, "domain_tag", 4)))
+                if name:
+                    tag_strs.append(name)
+            conf = out.tags[0].confidence if out.tags else 0.0
+            extra = ""
+            sk = (out.symbol or "").strip().upper()
+            if segment_top1_name_provider is not None:
+                row = seg_top1.get(sk)
+                if row and (row[0] or "").strip():
+                    nm, rv = row[0], row[1]
+                    extra = " | 主营披露 Top1: %s（%.1f%%）" % (nm, rv * 100.0)
+                else:
+                    extra = " | 主营披露: 无"
             else:
-                extra = " | 主营披露: 无"
-        else:
-            extra = " | 主营披露: （未配置 PG_L2_DSN 或未加载 L2 批量数据）"
-        print("  %s -> 领域标签: %s（置信度 %.2f）%s" % (out.symbol, "、".join(tag_strs) or "未知", conf, extra))
-    print()
+                extra = " | 主营披露: （未配置 PG_L2_DSN 或未加载 L2 批量数据）"
+            print("  %s -> 领域标签: %s（置信度 %.2f）%s" % (out.symbol, "、".join(tag_strs) or "未知", conf, extra))
+        print()
+    else:
+        from diting.pipeline_io import pipeline_frame_quiet
+
+        pipeline_frame_quiet()
+        print()
+        print("======== Module A（管道精简）========  ")
+        print("  本批 universe %s 只 | batch_id=%s" % (len(universe), batch_id))
+        print("  逐条分类结果请: make run-module-a ；L2 汇总: make query-full-pipeline-result")
+        print()
 
     write_location = "未写入"
     n_written = 0
@@ -155,6 +174,67 @@ def main():
 
     print("======== 写入 ========  ")
     print("  %s" % write_location)
+    if _pipeline_quiet():
+        print("  ── 下一模块 Module B 依赖 ──")
+        print("    · B 的 classifier 门控读 L2 classifier_output_snapshot；与本批对齐请用 batch_id=%s。" % batch_id)
+        if n_written > 0:
+            print("    · 本批已写入 %s 行；B 同源 universe 扫描时门控与上述 A 一致。" % n_written)
+        elif os.environ.get("PG_L2_DSN"):
+            print("    · 本批未成功写入 L2：B 仍跑 universe，但门控可能读到旧 classifier 批。")
+        else:
+            print("    · 未配 PG_L2_DSN：B 无 L2 classifier 预检（仅见 B 终端门控说明）。")
+        print("  ── 人眼校准 · 本批产出（应对齐 universe 行数）──")
+        row_ok = len(results) == n_written
+        print(
+            "    · 内存分类条数=%s | L2 classifier_output_snapshot 写入=%s 行 | %s"
+            % (len(results), n_written, "OK" if row_ok else "NG 条数不一致须查表/唯一约束")
+        )
+        tag_counts: Counter = Counter()
+        for out in results:
+            tag_strs = []
+            for t in out.tags:
+                name = getattr(t, "domain_label", None) or _DOMAIN_TAG_NAMES.get(
+                    getattr(t, "domain_tag", 4), str(getattr(t, "domain_tag", 4))
+                )
+                if name:
+                    tag_strs.append(name)
+            tag_counts[tag_strs[0] if tag_strs else "未知"] += 1
+        top = ", ".join("%s×%s" % (k, v) for k, v in tag_counts.most_common(10))
+        print("    · 领域首标签分布: %s" % (top or "—"))
+        cap = _calibration_list_max()
+        samp = sorted((s or "").strip().upper() for s in universe)[:cap]
+        print("    · universe 字母序前 %s 只: %s" % (cap, ", ".join(samp)))
+        if segment_top1_name_provider is not None and seg_top1:
+            with_seg = 0
+            for s in universe:
+                sk = (s or "").strip().upper()
+                row = seg_top1.get(sk)
+                if row and (row[0] or "").strip():
+                    with_seg += 1
+            print("    · L2 主营披露 Top1 非空: %s/%s 只（右脑/细分上游）" % (with_seg, len(universe)))
+        print("  ┌─ 模块 A 准出（设计对照 · 判断能否进入 Module B）────────────────")
+        print("  │ ① 行数: 分类=%s 行 | L2 写入=%s → %s" % (len(results), n_written, "通过" if row_ok else "不通过"))
+        if segment_top1_name_provider is not None and seg_top1:
+            _ws = sum(
+                1
+                for s in universe
+                if seg_top1.get((s or "").strip().upper())
+                and (seg_top1.get((s or "").strip().upper())[0] or "").strip()
+            )
+            print("  │ ② 主营披露 Top1 非空: %s/%s（细分/refresh 数据基础）" % (_ws, len(universe)))
+        else:
+            print("  │ ② 主营披露: 未加载 L2 批量（细分链路可能缺原料）")
+        _pg = bool(os.environ.get("PG_L2_DSN"))
+        _ok_b = row_ok and (n_written > 0 if _pg else True)
+        print(
+            "  │ ③ 结论: %s"
+            % (
+                "可进入 Module B（classifier batch 已落库，门控可对齐）"
+                if _ok_b
+                else "须先修复 L2 写入或分类条数再跑 B"
+            )
+        )
+        print("  └──────────────────────────────────────────────────────────────")
     print()
     sys.exit(0)
 

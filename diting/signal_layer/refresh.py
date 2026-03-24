@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import psycopg2
 
+from diting.ingestion.segment_tier import tier_int_to_signal_key
 from diting.signal_layer.adapters import get_adapter_for_segment
 from diting.signal_layer.models import RefreshSegmentSignalsResult
 from diting.signal_layer.understanding import understand_signal
@@ -17,17 +18,6 @@ from diting.signal_layer.understanding import understand_signal
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TTL_SEC = 3600
-
-
-def _infer_segment_tier(segment_id: str) -> str:
-    """从 segment_id 解析层级：domain=1 层，sector=2 层，business=3 层。"""
-    suffix = segment_id.split("seg_bp_", 1)[-1] if "seg_bp_" in segment_id else segment_id
-    parts = [p for p in suffix.split("_") if p]
-    if len(parts) <= 1:
-        return "domain"
-    if len(parts) == 2:
-        return "sector"
-    return "business"
 
 
 def _build_understanding_config(cfg: dict, track: str = "a") -> dict:
@@ -92,19 +82,19 @@ def _load_config(config_path: Optional[str] = None) -> dict:
 def _parse_segments_from_symbols(
     conn,
     symbols: List[str],
-) -> Tuple[Set[str], Dict[str, List[str]], Dict[str, str], List[str]]:
+) -> Tuple[Set[str], Dict[str, List[str]], Dict[str, str], Dict[str, Optional[int]], List[str]]:
     """
     从 symbol_business_profile 解析标的→细分。返回：
-    (segment_ids, segment_to_symbols, segment_to_name_cn, symbols_without_segments)
+    (segment_ids, segment_to_symbols, segment_to_name_cn, segment_to_tier, symbols_without_segments)
     """
     syms = [str(s).strip().upper() for s in symbols if (s or "").strip()]
     if not syms:
-        return set(), {}, {}, list(symbols)
+        return set(), {}, {}, {}, list(symbols)
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT s.symbol, s.segment_id, r.name_cn
+            SELECT s.symbol, s.segment_id, r.name_cn, r.segment_tier
             FROM symbol_business_profile s
             LEFT JOIN segment_registry r ON r.segment_id = s.segment_id
             WHERE s.symbol = ANY(%s)
@@ -116,7 +106,8 @@ def _parse_segments_from_symbols(
         cur.close()
     segment_to_symbols: Dict[str, List[str]] = {}
     segment_to_name_cn: Dict[str, str] = {}
-    for sym, seg_id, name_cn in (rows or []):
+    segment_to_tier: Dict[str, Optional[int]] = {}
+    for sym, seg_id, name_cn, tier in (rows or []):
         sid = str(seg_id or "").strip()
         if not sid:
             continue
@@ -125,9 +116,16 @@ def _parse_segments_from_symbols(
         if sym not in segment_to_symbols[sid]:
             segment_to_symbols[sid].append(sym)
         segment_to_name_cn[sid] = str(name_cn or "").strip() or sid
+        if tier is not None:
+            try:
+                segment_to_tier[sid] = int(tier)
+            except (TypeError, ValueError):
+                segment_to_tier[sid] = None
+        elif sid not in segment_to_tier:
+            segment_to_tier[sid] = None
     found = set(segment_to_symbols.keys())
     symbols_without = [s for s in syms if not any(s in segment_to_symbols.get(seg, []) for seg in found)]
-    return found, segment_to_symbols, segment_to_name_cn, symbols_without
+    return found, segment_to_symbols, segment_to_name_cn, segment_to_tier, symbols_without
 
 
 def _check_ttl(conn, segment_id: str, ttl_sec: int) -> bool:
@@ -252,7 +250,7 @@ def refresh_segment_signals_for_symbols(
     base_understanding_config = _build_understanding_config(cfg, track)
     conn = psycopg2.connect(pg_l2_dsn)
     try:
-        all_segments, seg_to_syms, seg_to_name, symbols_without = _parse_segments_from_symbols(conn, symbols)
+        all_segments, seg_to_syms, seg_to_name, seg_to_tier, symbols_without = _parse_segments_from_symbols(conn, symbols)
         result.symbols_without_segments = symbols_without
         result.summary["symbols_with_segments"] = result.summary["total_symbols"] - len(symbols_without)
         result.summary["segments_resolved"] = len(all_segments)
@@ -270,10 +268,10 @@ def refresh_segment_signals_for_symbols(
                 segments_skipped.append(seg_id)
                 continue
             understanding_config = dict(base_understanding_config)
-            tier = _infer_segment_tier(seg_id)
+            tier_key = tier_int_to_signal_key(seg_to_tier.get(seg_id), seg_id)
             override = base_understanding_config.get("model_override_by_tier") or {}
-            if tier in override and override[tier]:
-                understanding_config["model_id"] = str(override[tier]).strip()
+            if tier_key in override and override[tier_key]:
+                understanding_config["model_id"] = str(override[tier_key]).strip()
             if audit_reuse_same_day:
                 reused = _check_audit_reuse_same_day(conn, seg_id)
                 if reused:
@@ -327,6 +325,13 @@ def refresh_segment_signals_for_symbols(
         result.summary["segments_skipped_ttl"] = len(segments_skipped)
         result.summary["segments_written"] = len(segments_written)
         result.summary["segments_failed"] = len(segments_failed)
+        # 有细分信号的标的：至少 1 个细分已写入或 TTL 内有效（缓存未过期），均可供 C 使用
+        symbols_with_signal_set: Set[str] = set()
+        for seg_id in segments_written + segments_skipped:
+            for sym in seg_to_syms.get(seg_id, []):
+                if sym:
+                    symbols_with_signal_set.add(sym)
+        result.symbols_with_signal = sorted(symbols_with_signal_set)
     finally:
         conn.close()
     return result
