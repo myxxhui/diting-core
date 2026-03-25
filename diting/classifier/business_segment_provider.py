@@ -157,9 +157,10 @@ def get_segment_labels_and_shares_batch(
     dsn: str, symbols: List[str], top_n: int = 3
 ) -> Dict[str, List[Tuple[str, float]]]:
     """
-    每只标的按营收占比降序的 (label, revenue_share) 列表，用于 垂直占比 展示。
-    优先用 segment_registry.name_cn，缺则 segment_label_cn；label 经 refine 规范化。
-    返回 symbol.upper() -> [(label, share), ...]，share 为 0~1。
+    每只标的按营收占比降序的 (label, revenue_share) 列表，用于 垂直占比 / 终端观测表。
+    展示用 label = 财报分部原文：优先 symbol_business_profile.segment_label_cn，缺则 segment_registry.name_cn。
+    **不使用** refine_power_label_from_disclosure，避免多行被映射成同一短标签后出现「重复名称 + 占比可加总>100%」的误解。
+    每行对应 (symbol, segment_id) 唯一一行，TopN 即营收最高的 N 条披露。
     """
     if not dsn or not symbols or top_n < 1:
         return {}
@@ -167,11 +168,6 @@ def get_segment_labels_and_shares_batch(
         import psycopg2
     except ImportError:
         return {}
-    try:
-        from diting.classifier.semantic import refine_power_label_from_disclosure
-    except ImportError:
-        def refine_power_label_from_disclosure(x: str):
-            return (x or "").strip() or None
 
     syms = [s.strip().upper() for s in symbols if (s or "").strip()]
     if not syms:
@@ -184,19 +180,19 @@ def get_segment_labels_and_shares_batch(
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT s.symbol, COALESCE(NULLIF(TRIM(r.name_cn), ''), s.segment_label_cn), s.revenue_share
+                SELECT s.symbol,
+                       COALESCE(NULLIF(TRIM(s.segment_label_cn), ''), NULLIF(TRIM(r.name_cn), ''), '其他'),
+                       s.revenue_share
                 FROM symbol_business_profile s
                 LEFT JOIN segment_registry r ON r.segment_id = s.segment_id
                 WHERE s.symbol = ANY(%s)
-                ORDER BY s.symbol, s.revenue_share DESC
+                ORDER BY s.symbol, s.revenue_share DESC NULLS LAST
                 """,
                 (syms,),
             )
-            for sym, name_cn, rev in cur.fetchall():
+            for sym, disp, rev in cur.fetchall():
                 k = (sym or "").strip().upper()
-                raw = (name_cn or "").strip() if name_cn else ""
-                refined = refine_power_label_from_disclosure(raw) if raw else None
-                label = (refined or raw or "其他").strip() or "其他"
+                label = (disp or "").strip() or "其他"
                 lst = out.setdefault(k, [])
                 if len(lst) < top_n:
                     lst.append((label, float(rev or 0)))

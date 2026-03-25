@@ -204,6 +204,28 @@ def main():
         cap = _calibration_list_max()
         samp = sorted((s or "").strip().upper() for s in universe)[:cap]
         print("    · universe 字母序前 %s 只: %s" % (cap, ", ".join(samp)))
+        if os.environ.get("PG_L2_DSN"):
+            try:
+                from diting.classifier.business_segment_provider import get_segment_labels_and_shares_batch
+
+                _lab = get_segment_labels_and_shares_batch(os.environ["PG_L2_DSN"], universe, top_n=3)
+                _show_n = min(14, len(universe))
+                print(
+                    "    · 主营构成(披露口径 Top3 占比，与信号层观测一致；字母序前 %s 只):"
+                    % _show_n
+                )
+                for _s in sorted(universe)[:_show_n]:
+                    _sk = (_s or "").strip().upper()
+                    _parts = _lab.get(_sk) or []
+                    if not _parts:
+                        print("      %s  — 无 L2 主营行" % _sk)
+                    else:
+                        _seg = "  |  ".join(
+                            "%s %.1f%%" % (_p[0], float(_p[1] or 0) * 100.0) for _p in _parts[:3]
+                        )
+                        print("      %s  %s" % (_sk, _seg))
+            except Exception as _ex:
+                print("    · 主营构成 Top3: （读取失败: %s）" % _ex)
         if segment_top1_name_provider is not None and seg_top1:
             with_seg = 0
             for s in universe:

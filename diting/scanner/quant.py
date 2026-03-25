@@ -28,6 +28,7 @@ from diting.scanner.index_regime import compute_index_regime_modifiers
 from diting.scanner.pools import evaluate_pools
 from diting.scanner.risk_levels import compute_a_track_risk_levels
 from diting.scanner.scanner_metrics import ScannerRunMetrics
+from diting.scanner.scan_input_fingerprint import fetch_l1_ohlcv_max_ts_batch, fetch_l2_news_max_ts_batch
 from diting.scanner.signal_cooldown import symbols_in_signal_cooldown
 
 logger = logging.getLogger(__name__)
@@ -247,6 +248,11 @@ class QuantScanner:
             symbol_data.append((sym, list(arr), ret_20d, liq, atr_r, ret_lt))
         metrics.ms_fetch_batch_ohlcv = (time.perf_counter() - t_fetch0) * 1000.0
 
+        l2_dsn = (os.environ.get("PG_L2_DSN") or "").strip() or (ohlcv_dsn or "")
+        _sym_fp = [s[0] for s in symbol_data]
+        _fp_ohlcv = fetch_l1_ohlcv_max_ts_batch(_sym_fp, ohlcv_dsn, period="daily") if ohlcv_dsn else None
+        _fp_news = fetch_l2_news_max_ts_batch(_sym_fp, l2_dsn) if l2_dsn else {}
+
         # 按 symbol_data 下标做分位排名，便于按索引取
         t_rank0 = time.perf_counter()
         indexed_ret = [(i, x[2]) for i, x in enumerate(symbol_data) if x[2] is not None]
@@ -291,13 +297,14 @@ class QuantScanner:
         t_l2pre0 = time.perf_counter()
         cd_days = int(self._opt.get("signal_cooldown_days", 0) or 0)
         cd_confirmed = bool(self._opt.get("signal_cooldown_confirmed_only", True))
-        l2_dsn = (os.environ.get("PG_L2_DSN") or "").strip() or ohlcv_dsn
         cd_set = (
             symbols_in_signal_cooldown(
                 [s[0] for s in symbol_data],
                 l2_dsn,
                 cd_days,
                 confirmed_only=cd_confirmed,
+                current_ohlcv_max_ts=_fp_ohlcv,
+                current_news_max_ts=_fp_news if _fp_ohlcv is not None else None,
             )
             if cd_days > 0
             else set()
@@ -485,6 +492,9 @@ class QuantScanner:
             item["scanner_rules_fingerprint"] = self._scanner_rules_fingerprint
             item["evaluation_source"] = "FRESH"
             item["industry_mapped"] = industry_mapped
+            _sk = str(p["symbol"]).strip().upper()
+            item["scan_input_ohlcv_max_ts"] = _fp_ohlcv.get(_sk) if _fp_ohlcv else None
+            item["scan_input_news_max_ts"] = _fp_news.get(_sk)
             if need_long_term:
                 item["long_term_score"] = p["long_term_score"]
                 item["long_term_candidate"] = p["long_term_candidate"]

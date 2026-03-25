@@ -370,6 +370,16 @@ def _log_ingest_verify(symbols_full: list, total: int):
 # ===== 增量决策函数 =====
 
 
+def _age_days(now: datetime, ts: datetime) -> int:
+    """计算 now 与 ts 的日差；兼容 naive / aware 混用（如本地 naive 的 now 与 PG timestamptz）。"""
+    n, t = now, ts
+    if n.tzinfo is None and t.tzinfo is not None:
+        t = t.replace(tzinfo=None)
+    elif n.tzinfo is not None and t.tzinfo is None:
+        n = n.replace(tzinfo=None)
+    return (n - t).days
+
+
 def _decide_ohlcv(sym_key: str, latest_map: dict, mode: str, today: date):
     """
     返回 (should_ingest: bool, start_date: str|None, end_date: str|None, reason: str)
@@ -406,10 +416,7 @@ def _decide_industry(sym_key: str, updated_map: dict, mode: str, now: datetime):
     if ts is None:
         return True, "无历史数据"
     refresh = _industry_refresh_days()
-    if ts.tzinfo is None:
-        age = (now.replace(tzinfo=None) - ts).days
-    else:
-        age = (now - ts).days
+    age = _age_days(now, ts)
     if age > refresh:
         return True, f"已过期（{age} 天 > {refresh}）"
     return False, f"数据新鲜（{age} 天前更新）"
@@ -422,10 +429,7 @@ def _decide_business(sym_key: str, updated_map: dict, mode: str, now: datetime):
     if ts is None:
         return True, "无历史数据"
     refresh = _business_refresh_days()
-    if ts.tzinfo is None:
-        age = (now.replace(tzinfo=None) - ts).days
-    else:
-        age = (now - ts).days
+    age = _age_days(now, ts)
     if age > refresh:
         return True, f"已过期（{age} 天 > {refresh}）"
     return False, f"数据新鲜（{age} 天前更新）"
@@ -438,10 +442,7 @@ def _decide_financial(sym_key: str, updated_map: dict, mode: str, now: datetime)
     if ts is None:
         return True, "无历史数据"
     refresh = _financial_refresh_days()
-    if ts.tzinfo is None:
-        age = (now.replace(tzinfo=None) - ts).days
-    else:
-        age = (now - ts).days
+    age = _age_days(now, ts)
     if age > refresh:
         return True, f"已过期（{age} 天 > {refresh}）"
     return False, f"数据新鲜（{age} 天前更新）"
@@ -459,10 +460,7 @@ def _decide_news(sym_key: str, news_map: dict, mode: str, now: datetime = None):
     if max_pub is None or now is None:
         return True, "无历史数据" if max_pub is None else "无时间参考"
     stale_days = _news_stale_days()
-    if max_pub.tzinfo is None:
-        age_days = (now.replace(tzinfo=None) - max_pub).days
-    else:
-        age_days = (now - max_pub).days
+    age_days = _age_days(now, max_pub)
     if age_days <= stale_days:
         return False, "已有最新新闻（%s 天内）" % stale_days
     return True, "新闻已过期（%s 天前）" % age_days

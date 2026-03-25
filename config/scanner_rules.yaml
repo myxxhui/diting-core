@@ -102,7 +102,7 @@ module_b_quant_engine:
       enabled: true
       min_momentum_percentile: 0.0
       min_liquidity_percentile: 0.0
-    # 最近 N 个日历日：仅当该标的「最新一条」仍为确认/通过档时跳过；最新一条未通过则允许重算（见 signal_cooldown 实现）
+    # 最近 N 个日历日：最新一条仍为确认/通过档时「候选」冷却；若自上次扫描后 L1 日 K 或 L2 新闻/公告有更新，则该标的本轮不冷却（见 scan_input_* 与 signal_cooldown）
     signal_cooldown_days: 1
     signal_cooldown_confirmed_only: true
   # ---------- 性能：线程池并行 evaluate_pools（TA-Lib 多释放 GIL）；0=串行 ----------

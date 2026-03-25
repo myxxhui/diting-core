@@ -451,6 +451,26 @@ def main():
             )
             for s in carry_extra:
                 s["symbol_name"] = symbol_to_name.get(s.get("symbol", ""), "") or s.get("symbol_name", "")
+            if carry_extra and ohlcv_dsn:
+                from diting.scanner.carryover_risk_refresh import refresh_carryover_signals_pricing
+                from diting.scanner.config_loader import get_a_track_short_params, load_scanner_config
+                from diting.scanner.scan_input_fingerprint import (
+                    fetch_l1_ohlcv_max_ts_batch,
+                    fetch_l2_news_max_ts_batch,
+                )
+
+                _ats = get_a_track_short_params(load_scanner_config())
+                refresh_carryover_signals_pricing(
+                    carry_extra, ohlcv_dsn, _ats.get("risk") or {}
+                )
+                l2_fp = (os.environ.get("PG_L2_DSN") or "").strip() or ohlcv_dsn
+                _csyms = [str(s.get("symbol") or "") for s in carry_extra if s.get("symbol")]
+                _to = fetch_l1_ohlcv_max_ts_batch(_csyms, ohlcv_dsn)
+                _tn = fetch_l2_news_max_ts_batch(_csyms, l2_fp) if l2_fp else {}
+                for s in carry_extra:
+                    _k = str(s.get("symbol", "")).strip().upper()
+                    s["scan_input_ohlcv_max_ts"] = _to.get(_k)
+                    s["scan_input_news_max_ts"] = _tn.get(_k)
             signals.extend(carry_extra)
     if meta and not _pq:
         print()
@@ -488,7 +508,7 @@ def main():
         )
         if carry_extra:
             print(
-                "  冷却沿用 L2 快照并入本批: %s 只（分数与止损/止盈为上次写入值，本轮未重算 TA-Lib；与当前 batch_id 一并写入 L2）"
+                "  冷却沿用 L2 快照并入本批: %s 只（分数沿用上次；参考价/止损/止盈按 L1 最新收盘重算；与当前 batch_id 一并写入 L2）"
                 % len(carry_extra)
             )
         tags = meta.get("allowed_primary_tags") or []

@@ -18,6 +18,34 @@ from diting.scanner.ohlcv_feed import get_ohlcv_for_symbol, get_ohlcv_arrays_for
 from diting.scanner.pools import evaluate_trend, evaluate_reversion, evaluate_breakout, evaluate_pools
 from diting.scanner.config_fingerprint import compute_scanner_rules_fingerprint
 from diting.scanner.quant import QuantScanner
+from diting.scanner.scan_input_fingerprint import cooldown_still_valid
+from datetime import datetime, timezone
+
+
+def test_cooldown_still_valid_ohlcv_and_news():
+    t0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    t1 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    assert not cooldown_still_valid(
+        "X",
+        current_ohlcv_max=t1,
+        current_news_max=None,
+        stored_ohlcv_max=t0,
+        stored_news_max=None,
+    )
+    assert cooldown_still_valid(
+        "X",
+        current_ohlcv_max=t0,
+        current_news_max=None,
+        stored_ohlcv_max=t0,
+        stored_news_max=None,
+    )
+    assert not cooldown_still_valid(
+        "X",
+        current_ohlcv_max=t0,
+        current_news_max=t1,
+        stored_ohlcv_max=t0,
+        stored_news_max=t0,
+    )
 
 
 def test_scanner_rules_fingerprint_stable():

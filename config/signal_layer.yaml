@@ -1,5 +1,9 @@
 # [Ref: 06_B轨_信号层生产级数据采集_设计, 04_B轨_C模块右脑与信号设计] 信号层配置
 # 支持 DITING_TRACK=a|b 按轨选择；a=行业+标的新闻，b=周全垂直信号（可扩展适配器）
+#
+# 大模型：须在 .env 提供 SIGNAL_LAYER_API_KEY+SIGNAL_LAYER_MODEL_ID（或 OPENAI_API_KEY + 下方 model_id）。
+# 未配置时 understand_signal 返回 None；信号理解仅 LLM，无关键词规则。
+# signal_understanding.mode 保留兼容；实际仅调用大模型（见 understanding/engine.py）。
 
 signal_layer:
   max_input_chars: 4096
@@ -11,7 +15,7 @@ signal_layer:
 
 # 顶层默认（track 未覆盖时生效）
 signal_understanding:
-  mode: rule_first_then_ai
+  mode: ai_only
   model_id: ""
   base_url: ""
   prompt_path: config/prompts/segment_signal_understanding_v1.md
@@ -30,14 +34,14 @@ tracks:
     data_scope: news_and_announcements
     adapter_prefixes: ["seg_bp_"]
     understanding:
-      mode: rule_first_then_ai
+      mode: ai_only
       prompt_path: config/prompts/segment_signal_understanding_v1.md
       max_input_chars: 4096
   b_track:
     data_scope: comprehensive_vertical
     adapter_prefixes: ["seg_bp_"]
     understanding:
-      mode: rule_first_then_ai
+      mode: ai_only
       prompt_path: config/prompts/segment_signal_understanding_v1.md
       max_input_chars: 8192
 

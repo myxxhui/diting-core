@@ -4,9 +4,68 @@
 import json
 import logging
 import uuid
-from typing import Any, List
+from typing import Any, List, Tuple
 
 logger = logging.getLogger(__name__)
+
+_SQL_SNAPSHOT_FULL = """
+                INSERT INTO quant_signal_snapshot
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scan_input_ohlcv_max_ts, scan_input_news_max_ts, scanner_rules_fingerprint, evaluation_source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+
+_SQL_SNAPSHOT_LEGACY = """
+                INSERT INTO quant_signal_snapshot
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scanner_rules_fingerprint, evaluation_source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+
+_SQL_SCAN_ALL_FULL = """
+                INSERT INTO quant_signal_scan_all
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, passed, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scan_input_ohlcv_max_ts, scan_input_news_max_ts, scanner_rules_fingerprint, evaluation_source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+
+_SQL_SCAN_ALL_LEGACY = """
+                INSERT INTO quant_signal_scan_all
+                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, passed, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scanner_rules_fingerprint, evaluation_source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+
+
+def _l2_has_scan_input_columns(conn, table: str) -> bool:
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+              AND column_name = 'scan_input_ohlcv_max_ts'
+            LIMIT 1
+            """,
+            (table,),
+        )
+        ok = cur.fetchone() is not None
+        cur.close()
+        return ok
+    except Exception:
+        return False
+
+
+def _strip_scan_input_from_signal_row(row: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    """_signal_to_row 的 25 元组去掉 scan_input 两列，得到兼容旧表的 23 元组。"""
+    if len(row) < 25:
+        return row
+    return row[:21] + row[23:25]
+
+
+def _signal_to_scan_all_row_compat(signal: Any, batch_id: str, correlation_id: str, include_scan_input: bool) -> tuple:
+    row = _signal_to_row(signal, batch_id, correlation_id)
+    passed = bool(_get_attr(signal, "passed", False))
+    if include_scan_input:
+        return row[:11] + (passed,) + row[11:]
+    row2 = _strip_scan_input_from_signal_row(row)
+    return row2[:11] + (passed,) + row2[11:]
 
 # StrategyPool 枚举名，与 02 规约 §4、QuantSignal 契约一致；L2 表 strategy_source VARCHAR(16)
 _STRATEGY_NAMES = {
@@ -69,19 +128,18 @@ def _signal_to_row(signal: Any, batch_id: str, correlation_id: str) -> tuple:
     risk_json = str(_get_attr(signal, "risk_rules_json") or "{}")[:4000]
     fp = str(_get_attr(signal, "scanner_rules_fingerprint") or "")[:32]
     ev = str(_get_attr(signal, "evaluation_source") or "FRESH")[:16]
+    ts_o = _get_attr(signal, "scan_input_ohlcv_max_ts")
+    ts_n = _get_attr(signal, "scan_input_news_max_ts")
     return (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength,
             trend_score, reversion_score, breakout_score, momentum_score, score_percentile,
             long_term_score, long_term_candidate, corr,
             signal_tier, alert_passed, confirmed_passed, entry_ref, stop_loss, take_profit_json, risk_json,
-            fp, ev)
+            ts_o, ts_n, fp, ev)
 
 
 def _signal_to_scan_all_row(signal: Any, batch_id: str, correlation_id: str) -> tuple:
-    """将单条 QuantSignal 转为 quant_signal_scan_all 行：percentile 后为 passed，再 long_term… 至 risk_json。"""
-    row = _signal_to_row(signal, batch_id, correlation_id)
-    passed = bool(_get_attr(signal, "passed", False))
-    # row: …21 元组末两项为 fingerprint、evaluation_source
-    return row[:11] + (passed,) + row[11:]
+    """将单条 QuantSignal 转为 quant_signal_scan_all 行（含 scan_input_*，写入时按库列裁剪）。"""
+    return _signal_to_scan_all_row_compat(signal, batch_id, correlation_id, True)
 
 
 def write_quant_signal_snapshot(
@@ -112,20 +170,21 @@ def write_quant_signal_snapshot(
         logger.warning("psycopg2 未安装，跳过写入 L2 quant_signal_snapshot")
         return 0
 
-    rows = [_signal_to_row(s, batch_id, correlation_id) for s in passed_only]
+    rows_full = [_signal_to_row(s, batch_id, correlation_id) for s in passed_only]
+    rows_legacy = [_strip_scan_input_from_signal_row(r) for r in rows_full]
 
     try:
         conn = psycopg2.connect(dsn)
         try:
             cur = conn.cursor()
-            cur.executemany(
-                """
-                INSERT INTO quant_signal_snapshot
-                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scanner_rules_fingerprint, evaluation_source)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                rows,
-            )
+            use_si = _l2_has_scan_input_columns(conn, "quant_signal_snapshot")
+            rows = rows_full if use_si else rows_legacy
+            sql = _SQL_SNAPSHOT_FULL if use_si else _SQL_SNAPSHOT_LEGACY
+            if not use_si:
+                logger.info(
+                    "quant_signal_snapshot 无 scan_input_* 列，使用兼容写入；可执行 make init-l2-quant-signal-table 补列"
+                )
+            cur.executemany(sql, rows)
             conn.commit()
             n = len(rows)
             logger.info("QuantSignal 写入 L2 quant_signal_snapshot（通过）: batch_id=%s, 行数=%s", batch_id, n)
@@ -159,20 +218,21 @@ def write_quant_signal_scan_all(
         logger.warning("psycopg2 未安装，跳过写入 L2 quant_signal_scan_all")
         return 0
 
-    rows = [_signal_to_scan_all_row(s, batch_id, correlation_id) for s in signals]
-
     try:
         conn = psycopg2.connect(dsn)
         try:
+            use_si = _l2_has_scan_input_columns(conn, "quant_signal_scan_all")
+            if use_si:
+                rows = [_signal_to_scan_all_row_compat(s, batch_id, correlation_id, True) for s in signals]
+                sql = _SQL_SCAN_ALL_FULL
+            else:
+                rows = [_signal_to_scan_all_row_compat(s, batch_id, correlation_id, False) for s in signals]
+                sql = _SQL_SCAN_ALL_LEGACY
+                logger.info(
+                    "quant_signal_scan_all 无 scan_input_* 列，使用兼容写入；可执行 make init-l2-quant-signal-table 补列"
+                )
             cur = conn.cursor()
-            cur.executemany(
-                """
-                INSERT INTO quant_signal_scan_all
-                (batch_id, symbol, symbol_name, technical_score, strategy_source, sector_strength, trend_score, reversion_score, breakout_score, momentum_score, technical_score_percentile, passed, long_term_score, long_term_candidate, correlation_id, signal_tier, alert_passed, confirmed_passed, entry_reference_price, stop_loss_price, take_profit_json, risk_rules_json, scanner_rules_fingerprint, evaluation_source)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                rows,
-            )
+            cur.executemany(sql, rows)
             conn.commit()
             n = len(rows)
             logger.info("QuantSignal 全量写入 L2 quant_signal_scan_all: batch_id=%s, 行数=%s", batch_id, n)

@@ -157,7 +157,8 @@ def _run_a_track_branch(dsn: str, symbols: list, symbol_source: str) -> int:
 
         pipeline_frame_quiet()
         print("======== 信号层（A 轨：双路打标 + 观测表）========")
-    print("  [说明] DITING_TRACK=a：不写 segment_signal_cache；解析标的新闻与申万行业新闻（L2 scope），规则/AI 打标写入 a_track_signal_cache。")
+    print("  [说明] DITING_TRACK=a：不写 segment_signal_cache；拉取标的新闻与申万行业新闻（L2 scope），"
+          "仅已配置大模型时打标写入 a_track_signal_cache；未配置则跳过打标（见 .env SIGNAL_LAYER_*）。")
     print()
 
     cfg = None
@@ -170,6 +171,23 @@ def _run_a_track_branch(dsn: str, symbols: list, symbol_source: str) -> int:
                 cfg = yaml.safe_load(f) or {}
     except Exception:
         cfg = None
+    try:
+        from diting.signal_layer.refresh import _build_understanding_config
+        from diting.signal_layer.understanding.engine import is_llm_configured
+
+        _bu = _build_understanding_config(cfg or {}, "a")
+        print(
+            "  大模型: %s"
+            % (
+                "已配置（可产生 LLM 打标/摘要）"
+                if is_llm_configured(_bu)
+                else "未配置（不会调用 API；各标的【AI打标】见下方观测表）"
+            )
+        )
+        print()
+    except Exception:
+        print("  大模型: （无法检测配置）")
+        print()
     try:
         at_res = refresh_a_track_signals_for_symbols(
             sym_set,
@@ -218,13 +236,6 @@ def _run_a_track_branch(dsn: str, symbols: list, symbol_source: str) -> int:
         print("  └──────────────────────────────────────────────────────────────")
         print("  ── 下一模块 Module C 依赖 ──")
         print("  · A 轨：C 合并 a_track_signal_cache 与 segment_signal_cache（若有）。")
-    if not _pq:
-        print()
-        print("【本批标的】(%d 只):" % len(sym_set))
-        for sym in sym_set[:50]:
-            print("  %s %s" % (sym, _name(sym)))
-        if len(sym_set) > 50:
-            print("  ... 共 %d 只，仅展示前 50" % len(sym_set))
     print()
     return 0
 

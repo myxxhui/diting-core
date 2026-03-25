@@ -13,7 +13,7 @@ import psycopg2
 from diting.signal_layer.models import ATrackRefreshResult
 from diting.signal_layer.news_fetch import fetch_industry_news_text, fetch_symbol_news_text
 from diting.signal_layer.refresh import _build_understanding_config, _load_config
-from diting.signal_layer.understanding import understand_signal
+from diting.signal_layer.understanding.engine import is_llm_configured, understand_signal
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ def refresh_a_track_signals_for_symbols(
 ) -> ATrackRefreshResult:
     """
     A 轨：对每只标的拉取「标的新闻/公告」+ 对其申万行业拉取「行业新闻/公告」，
-    分别规则/AI 打标，写入 a_track_signal_cache（cache_key=sym:XXX / ind:行业名）。
+    已配置大模型时打标写入 a_track_signal_cache（sym: / ind:）；未配置时不写（或仅失败兜底见 fallback_on_failure）。
     行业新闻在行业维度去重：同一批多只同属一行业只打标一次。
     """
     result = ATrackRefreshResult()
@@ -125,6 +125,7 @@ def refresh_a_track_signals_for_symbols(
     days_back = int(sig_cfg.get("days_back") or opt.get("days_back") or 7)
     fallback = sig_cfg.get("fallback_on_failure", True)
     base_understanding_config = _build_understanding_config(cfg, track)
+    llm_ok = is_llm_configured(base_understanding_config)
 
     syms = sorted({str(s).strip().upper() for s in symbols if (s or "").strip()})
     result.summary["total_symbols"] = len(syms)
@@ -148,16 +149,20 @@ def refresh_a_track_signals_for_symbols(
                 continue
             tagged = understand_signal(raw, ck, base_understanding_config)
             if not tagged:
-                if fallback:
+                if not llm_ok:
+                    result.symbols_failed[sym] = "未配置大模型(SIGNAL_LAYER_API_KEY+SIGNAL_LAYER_MODEL_ID 或 YAML api_key+model_id)，已跳过打标"
+                elif fallback:
                     tagged = {
                         "type": "policy",
                         "direction": "neutral",
                         "strength": 0.5,
                         "summary_cn": raw[:200] + ("…" if len(raw) > 200 else ""),
                         "risk_tags": [],
+                        "signal_source": "fallback_neutral",
                     }
                 else:
                     result.symbols_failed[sym] = "信号理解失败"
+                if not tagged:
                     continue
             tagged = dict(tagged)
             tagged["source_scope"] = "symbol"
@@ -177,16 +182,20 @@ def refresh_a_track_signals_for_symbols(
                 continue
             tagged = understand_signal(raw, ck, base_understanding_config)
             if not tagged:
-                if fallback:
+                if not llm_ok:
+                    result.industries_failed[ind] = "未配置大模型，已跳过打标"
+                elif fallback:
                     tagged = {
                         "type": "policy",
                         "direction": "neutral",
                         "strength": 0.5,
                         "summary_cn": raw[:200] + ("…" if len(raw) > 200 else ""),
                         "risk_tags": [],
+                        "signal_source": "fallback_neutral",
                     }
                 else:
                     result.industries_failed[ind] = "信号理解失败"
+                if not tagged:
                     continue
             tagged = dict(tagged)
             tagged["source_scope"] = "industry"

@@ -129,6 +129,10 @@ ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS scanner_rules_fingerp
 ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS evaluation_source VARCHAR(16) NOT NULL DEFAULT 'FRESH';
 ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS scanner_rules_fingerprint VARCHAR(32) NOT NULL DEFAULT '';
 ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS evaluation_source VARCHAR(16) NOT NULL DEFAULT 'FRESH';
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS scan_input_ohlcv_max_ts TIMESTAMPTZ;
+ALTER TABLE quant_signal_snapshot ADD COLUMN IF NOT EXISTS scan_input_news_max_ts TIMESTAMPTZ;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS scan_input_ohlcv_max_ts TIMESTAMPTZ;
+ALTER TABLE quant_signal_scan_all ADD COLUMN IF NOT EXISTS scan_input_news_max_ts TIMESTAMPTZ;
 """
 
 

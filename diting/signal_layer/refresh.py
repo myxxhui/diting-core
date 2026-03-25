@@ -13,7 +13,7 @@ import psycopg2
 from diting.ingestion.segment_tier import tier_int_to_signal_key
 from diting.signal_layer.adapters import get_adapter_for_segment
 from diting.signal_layer.models import RefreshSegmentSignalsResult
-from diting.signal_layer.understanding import understand_signal
+from diting.signal_layer.understanding.engine import is_llm_configured, understand_signal
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ def _build_understanding_config(cfg: dict, track: str = "a") -> dict:
     if prompt_path and not Path(prompt_path).is_absolute():
         prompt_path = str(root / prompt_path)
     return {
-        "mode": su_cfg.get("mode") or "rule_first_then_ai",
+        "mode": su_cfg.get("mode") or "ai_only",
         "max_input_chars": int(su_cfg.get("max_input_chars") or sig_cfg.get("max_input_chars") or 4096),
         "model_id": model_id,
         "api_key": api_key,
@@ -272,6 +272,7 @@ def refresh_segment_signals_for_symbols(
             override = base_understanding_config.get("model_override_by_tier") or {}
             if tier_key in override and override[tier_key]:
                 understanding_config["model_id"] = str(override[tier_key]).strip()
+            llm_ok = is_llm_configured(understanding_config)
             if audit_reuse_same_day:
                 reused = _check_audit_reuse_same_day(conn, seg_id)
                 if reused:
@@ -298,13 +299,16 @@ def refresh_segment_signals_for_symbols(
 
             tagged = understand_signal(raw, seg_id, understanding_config, audit_callback=_audit_cb)
             if not tagged:
-                if fallback:
+                if not llm_ok:
+                    segments_failed[seg_id] = "未配置大模型，已跳过打标"
+                elif fallback:
                     tagged = {
                         "type": "policy",
                         "direction": "neutral",
                         "strength": 0.5,
                         "summary_cn": raw[:200] + ("…" if len(raw) > 200 else ""),
                         "risk_tags": [],
+                        "signal_source": "fallback_neutral",
                     }
                     if audit_enabled:
                         _write_audit(conn, seg_id, "fallback", raw[:2048], json.dumps(tagged, ensure_ascii=False), "信号理解失败，使用中性兜底")

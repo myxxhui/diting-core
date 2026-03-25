@@ -3,7 +3,7 @@
 import pytest
 
 from diting.signal_layer.models import RefreshSegmentSignalsResult
-from diting.signal_layer.understanding.engine import understand_signal, _rule_tag, _validate_schema
+from diting.signal_layer.understanding.engine import understand_signal, _validate_schema
 
 
 def test_refresh_result_dataclass():
@@ -17,28 +17,6 @@ def test_refresh_result_dataclass():
     assert r.summary["total_symbols"] == 2
 
 
-def test_rule_tag_bullish():
-    text = "政策支持新能源扩产，订单增长明显，需求旺盛。"
-    out = _rule_tag(text)
-    assert out["direction"] == "bullish"
-    assert 0.5 <= out["strength"] <= 1.0
-    assert out["type"] == "policy"
-    assert "summary_cn" in out
-
-
-def test_rule_tag_bearish():
-    text = "限产令下达，公司面临处罚，业绩下滑。"
-    out = _rule_tag(text)
-    assert out["direction"] == "bearish"
-    assert 0.5 <= out["strength"] <= 1.0
-
-
-def test_rule_tag_neutral():
-    text = "今日天气晴朗，无重大消息。"
-    out = _rule_tag(text)
-    assert out["direction"] == "neutral"
-
-
 def test_validate_schema():
     assert _validate_schema({"direction": "bullish", "strength": 0.7, "summary_cn": "利好"}) is True
     assert _validate_schema({"direction": "x", "strength": 0.5, "summary_cn": "x"}) is False
@@ -46,14 +24,41 @@ def test_validate_schema():
     assert _validate_schema({"direction": "bullish", "strength": 0.5}) is False  # missing summary_cn
 
 
-def test_understand_signal_rule_path():
-    out = understand_signal("政策支持扩产，订单增长。", "seg_bp_x", {"mode": "rule_only"})
-    assert out is not None
-    assert out["direction"] in ("bullish", "bearish", "neutral")
-    assert 0.0 <= out["strength"] <= 1.0
-    assert out["summary_cn"]
-
-
 def test_understand_signal_empty_returns_none():
     assert understand_signal("", "x", {}) is None
     assert understand_signal("a", "x", {}) is None
+
+
+def test_understand_signal_no_llm_returns_none():
+    text = "政策支持扩产，订单增长签约合作，需求旺盛景气。" * 2
+    assert len(text) >= 5
+    assert understand_signal(text, "seg_x", {}) is None
+    assert understand_signal(text, "seg_x", {"mode": "ai_only"}) is None
+
+
+def test_understand_signal_ai_only_path(monkeypatch):
+    """已配置 key+model 时仅走 _ai_tag。"""
+    def _fake_ai(raw_text, segment_id, config, audit_callback=None):
+        return {
+            "type": "policy",
+            "direction": "bullish",
+            "strength": 0.72,
+            "summary_cn": "模型摘要示例",
+            "risk_tags": [],
+            "signal_source": "llm",
+        }
+
+    monkeypatch.setattr(
+        "diting.signal_layer.understanding.engine._ai_tag",
+        _fake_ai,
+    )
+    text = "这是一条足够长的输入文本用于信号理解测试。"
+    out = understand_signal(
+        text,
+        "seg_test",
+        {"api_key": "sk-test", "model_id": "gpt-4o-mini"},
+    )
+    assert out is not None
+    assert out["direction"] == "bullish"
+    assert out["summary_cn"] == "模型摘要示例"
+    assert out.get("signal_source") == "llm"
