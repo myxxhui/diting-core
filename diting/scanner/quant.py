@@ -79,7 +79,7 @@ def _compute_20d_return(close: Any) -> Optional[float]:
 
 
 def _compute_long_term_return(close: Any, lookback: int) -> Optional[float]:
-    """B 轨长期动量：lookback 日收益率 (close[-1]/close[-1-lookback] - 1)。[Ref: 06_B轨需求与实现缺口分析]"""
+    """中长期（long_term）动量：lookback 日收益率 (close[-1]/close[-1-lookback] - 1)。[Ref: diting-doc 02_B模块策略_策略实现规约 · long_term]"""
     if close is None or lookback < 1:
         return None
     n = lookback + 1

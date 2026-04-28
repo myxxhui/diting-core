@@ -1,4 +1,4 @@
-# [Ref: 04_A轨_MoE议会_设计] Module C 专家意见写入 L2，供 query-module-c-output 与判官联调
+# [Ref: 04_A轨_MoE议会_设计] Module C 专家意见写入 L2，供 query-module-c-output 与决策中枢联调
 
 import json
 import logging

@@ -149,7 +149,7 @@ def get_optimization_params(config: Optional[Dict[str, Any]] = None) -> Dict[str
 
 
 def get_long_term_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """B 轨长期价值发现：长期动量分位与候选阈值。见 06_B轨需求与实现缺口分析。"""
+    """long_term 长期价值发现：长期动量分位与候选阈值。[Ref: diting-doc 平台与产品/01_需求与产品范围、02_B模块策略_策略实现规约]"""
     if config is None:
         config = load_scanner_config()
     engine = config.get("module_b_quant_engine") or {}
